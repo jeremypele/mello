@@ -609,6 +609,17 @@ class Mello:
             self._resume_cache_uri = progress.get('uri') if progress else None
         return self._resume_cache_uri
 
+    def _focus_label(self, item: Optional[CatalogItem]) -> Optional[tuple]:
+        """(name, artist) for the focused cover, once the carousel has landed on it.
+
+        The title area is blank while browsing stopped, so name what's under the
+        finger. Same settle gate as the track list fetch: covers flying past
+        during a scroll never get labelled, only the one we stop on.
+        """
+        if not item or not self.carousel.settled or self.touch.dragging:
+            return None
+        return (item.name, item.artist or '')
+
     def _maybe_fetch_track_list(self):
         """Fetch the focused album's track list once the carousel settles.
 
@@ -2959,6 +2970,7 @@ class Mello:
             bedtime_uri=self.settings.bedtime_uri,
             catalog_items=self.catalog_manager.items,
             auto_pause_remaining=self.auto_pause.remaining_seconds(),
+            focus_label=self._focus_label(focused_item),
             prev_track_name=prev_track.name if prev_track else None,
             next_track_name=next_track.name if next_track else None,
             track_list=track_list,
