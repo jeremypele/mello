@@ -43,6 +43,7 @@ class RenderContext:
     bedtime_uri: Optional[str] = None
     catalog_items: List[CatalogItem] = field(default_factory=list)  # unfiltered, for menus
     auto_pause_remaining: Optional[float] = None  # seconds left, for the wind-down bar
+    focus_label: Optional[tuple] = None      # (name, artist) of the settled cover, when nothing plays
     prev_track_name: Optional[str] = None    # peek under the cover: what just played
     next_track_name: Optional[str] = None    # peek under the cover: what's coming
     track_list: list = field(default_factory=list)   # full list for the track screen

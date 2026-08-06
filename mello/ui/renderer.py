@@ -100,7 +100,8 @@ class Renderer:
     @staticmethod
     def _get_track_key(item: Optional[CatalogItem], now_playing: NowPlaying,
                        is_loading: bool, pending_focus_uri: Optional[str],
-                       requested_focus_uri: Optional[str], play_in_progress: bool) -> Optional[Tuple[str, str]]:
+                       requested_focus_uri: Optional[str], play_in_progress: bool,
+                       focus_label: Optional[Tuple[str, str]] = None) -> Optional[Tuple[str, str]]:
         """Return (name, artist) tuple for the title area, or None."""
         if not item:
             return None
@@ -115,7 +116,10 @@ class Renderer:
         current_track = item.current_track if isinstance(item.current_track, dict) else None
         if current_track and current_track.get('name'):
             return (current_track.get('name'), current_track.get('artist') or '')
-        return None
+        # Nothing to say about a track: name the cover itself, so browsing while
+        # stopped isn't a blank title area. The app only supplies this once the
+        # carousel has settled — see App._focus_label.
+        return focus_label
     
     def draw(self, ctx: RenderContext) -> Optional[List[pygame.Rect]]:
         """
@@ -155,8 +159,9 @@ class Renderer:
             ctx.pending_focus_uri,
             ctx.requested_focus_uri,
             ctx.play_in_progress,
+            ctx.focus_label,
         )
-        
+
         # Everything that changes what's drawn but isn't covered by the checks
         # below. The on-cover buttons are here because their hit rects now
         # outlive a frame, so a visibility change without a redraw would leave a
@@ -423,6 +428,7 @@ class Renderer:
             ctx.pending_focus_uri,
             ctx.requested_focus_uri,
             ctx.play_in_progress,
+            ctx.focus_label,
         )
         if not track_key:
             return
