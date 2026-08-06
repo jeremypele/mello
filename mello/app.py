@@ -1610,9 +1610,9 @@ class Mello:
         elif key == pygame.K_SPACE or key == pygame.K_RETURN:
             self._toggle_play()
         elif key == pygame.K_n:
-            self._skip_track(self.api.next)
+            self._skip_track(1)
         elif key == pygame.K_p:
-            self._skip_track(self.api.prev)
+            self._skip_track(-1)
     
     def _handle_touch_down(self, pos):
         """Handle touch/mouse down."""
@@ -1922,7 +1922,7 @@ class Mello:
             # Prev: Y = center_y - btn_spacing (485)
             elif center_y - btn_spacing - BTN_SIZE <= y <= center_y - btn_spacing + BTN_SIZE:
                 button_pressed = 'prev'
-                self._skip_track(self.api.prev)
+                self._skip_track(-1)
             # Play: Y = center_y (640)
             elif center_y - PLAY_BTN_SIZE <= y <= center_y + PLAY_BTN_SIZE:
                 button_pressed = 'play'
@@ -1930,7 +1930,7 @@ class Mello:
             # Next: Y = center_y + btn_spacing (795)
             elif center_y + btn_spacing - BTN_SIZE <= y <= center_y + btn_spacing + BTN_SIZE:
                 button_pressed = 'next'
-                self._skip_track(self.api.next)
+                self._skip_track(1)
 
             if button_pressed:
                 logger.debug(f'Button press: {button_pressed}')
@@ -2002,10 +2002,26 @@ class Mello:
             and self.now_playing.paused
         )
 
-    def _skip_track(self, api_fn):
-        """Save progress, mark as user action, then skip prev/next."""
+    def _skip_track(self, delta: int):
+        """Save progress, mark as user action, then skip prev/next.
+
+        Stopped or paused there is nothing for librespot to skip, so resolve
+        the neighbour from the focused album's list and play it outright —
+        prev/next should move and sound, not just move.
+        """
         self.playback.last_user_play_time = time.time()
         self.playback.save_progress(self.now_playing, force=True)
+
+        if not self.now_playing.playing:
+            self._user_activated_playback = True
+            self._clear_manual_pause_lock('skip_track')
+            # Flip the play icon now: resolving the track can mean a fetch.
+            self.playback.play_state.set_pending('play')
+            self.renderer.invalidate()
+            run_async(self._skip_while_stopped, delta)
+            return
+
+        api_fn = self.api.next if delta > 0 else self.api.prev
 
         def _do_skip():
             if not api_fn():
@@ -2014,6 +2030,37 @@ class Mello:
                     self._show_toast('Not connected')
 
         run_async(_do_skip)
+
+    def _skip_while_stopped(self, delta: int):
+        """Worker: play the track before/after the focused one.
+
+        Fetches the track list if it isn't cached — pressing next on an album
+        we've never listed must still move, not sit there. Wraps at both ends,
+        matching the repeat-context loop albums and playlists already play in.
+        """
+        context_uri, reference_uri = self._focused_context()
+        tracks = None
+        if context_uri:
+            tracks = self.track_lists.get(context_uri)
+            if tracks is None:
+                logger.info(f'Skip while stopped: fetching list for {context_uri[:45]}')
+                tracks = self.track_lists.fetch(context_uri)
+
+        if not tracks:
+            # No list to walk (shared quota, not logged in, unlistable context):
+            # librespot is the only thing that knows the order.
+            logger.info('Skip while stopped: no track list, asking librespot')
+            self.playback.play_state.clear()
+            api_fn = self.api.next if delta > 0 else self.api.prev
+            if not api_fn():
+                self._show_toast('Not connected')
+            return
+
+        index = next((i for i, t in enumerate(tracks) if t.uri == reference_uri), 0)
+        track = tracks[(index + delta) % len(tracks)]
+        logger.info(f'Skip while stopped: playing {track.name}')
+        self.volume.unmute()
+        self.playback.play_item(context_uri, skip_to_uri=track.uri)
 
     def _toggle_play(self):
         """Toggle play/pause."""

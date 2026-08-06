@@ -936,6 +936,11 @@ class Renderer:
     _MENU_CONTENT_BOT = 20      # content extends to near screen edge
     _MENU_NAV_SIZE = 60          # close/back icon button diameter
     _MENU_NAV_CENTER = (670, 50)   # close/back icon button center (user's top-left)
+    # Track rows run wider than the rest of the menu and wrap onto two lines:
+    # podcast episodes in a series share a long prefix, and a 400px single line
+    # cut them all at the same word — every row read the same.
+    _MENU_TRACK_W = 620
+    _MENU_TRACK_LINES = 2
 
 
     def _draw_menu_frame(self, ctx: 'RenderContext'):
@@ -1105,10 +1110,38 @@ class Renderer:
             is_current = i == ctx.track_list_index
             color = COLORS['accent'] if is_current else COLORS['bg_elevated']
             name = track.name or 'Unknown'
-            label = f'{i + 1}. {name}'
-            display = label if len(label) <= 22 else label[:20] + '..'
-            items.append(('button', f'track_{i}', display, color))
+            lines = self._wrap_to_width(f'{i + 1}. {name}', self.font_medium,
+                                        self._MENU_TRACK_W - 30, self._MENU_TRACK_LINES)
+            items.append(('track', f'track_{i}', lines, color))
         return items
+
+    @staticmethod
+    def _wrap_to_width(text: str, font: pygame.font.Font, width: int,
+                       max_lines: int) -> list:
+        """Greedy word wrap to `width` pixels, ellipsis on what doesn't fit.
+
+        Measured, not counted: the old fixed 22-character cut threw away a
+        third of a line that had room for it.
+        """
+        lines = ['']
+        for word in text.split():
+            candidate = f'{lines[-1]} {word}'.strip()
+            if not lines[-1] or font.size(candidate)[0] <= width:
+                lines[-1] = candidate
+            elif len(lines) < max_lines:
+                lines.append(word)
+            else:
+                lines[-1] = Renderer._ellipsise(lines[-1], font, width)
+                return lines
+        return [line if font.size(line)[0] <= width
+                else Renderer._ellipsise(line, font, width) for line in lines]
+
+    @staticmethod
+    def _ellipsise(text: str, font: pygame.font.Font, width: int) -> str:
+        """Drop characters until the text plus its ellipsis fits."""
+        while text and font.size(text + '…')[0] > width:
+            text = text[:-1]
+        return text.rstrip() + '…'
 
     def _build_wifi_content(self, ctx: 'RenderContext') -> list:
         items = []
@@ -1160,7 +1193,7 @@ class Renderer:
     # the cursor must clear the *next* row's extent — hence extents, not advances.
     def _menu_row_extent(self, kind: str) -> int:
         H, GAP = self._MENU_BTN_H, self._MENU_BTN_GAP
-        if kind in ('button', 'vol_row', 'placeholder'):
+        if kind in ('button', 'track', 'vol_row', 'placeholder'):
             return H
         if kind == 'header':
             return 30
@@ -1206,6 +1239,13 @@ class Renderer:
                 _, btn_id, label, color = item
                 btn = pygame.Rect(x, Y, H, W)
                 self._draw_menu_button(btn, label, color)
+                self.menu_button_rects[btn_id] = btn
+
+            elif kind == 'track':
+                _, btn_id, lines, color = item
+                track_w = self._MENU_TRACK_W
+                btn = pygame.Rect(x, CAROUSEL_CENTER_Y - track_w // 2, H, track_w)
+                self._draw_menu_button(btn, lines, color)
                 self.menu_button_rects[btn_id] = btn
 
             elif kind == 'separator':
@@ -1258,11 +1298,20 @@ class Renderer:
         for btn_id in to_remove:
             del self.menu_button_rects[btn_id]
 
-    def _draw_menu_button(self, rect: pygame.Rect, label: str, bg_color: tuple,
+    def _draw_menu_button(self, rect: pygame.Rect, label, bg_color: tuple,
                           text_color: Optional[tuple] = None):
-        """Draw a rounded rectangle button with rotated label."""
+        """Draw a rounded rectangle button with rotated label.
+
+        A list of lines stacks them down the button (decreasing X is down,
+        from the user's view).
+        """
         text_color = text_color or COLORS['text_primary']
         pygame.draw.rect(self.screen, bg_color, rect, border_radius=18)
-        text_surf = self._render_text_rotated(label, self.font_medium, text_color)
-        self.screen.blit(text_surf, text_surf.get_rect(center=rect.center))
+        lines = [label] if isinstance(label, str) else list(label)
+        step = self.font_medium.get_linesize()
+        first = rect.centerx + step * (len(lines) - 1) // 2
+        for i, line in enumerate(lines):
+            text_surf = self._render_text_rotated(line, self.font_medium, text_color)
+            self.screen.blit(text_surf,
+                             text_surf.get_rect(center=(first - i * step, rect.centery)))
 
