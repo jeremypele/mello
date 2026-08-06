@@ -61,12 +61,14 @@ That covers **albums and podcast shows**. Playlists need one more step.
 
 ## Playlists also need a one-time login
 
-Spotify requires the `playlist-read-private` scope on
-`/v1/playlists/{id}/tracks` — for *every* playlist, public ones included. The
-app key above uses the *client credentials* flow, which carries no scopes at
-all, so it can never read a playlist's tracks no matter who owns the playlist or
-how public it is. Copying a playlist to make it yours does not help; that was
-worth ruling out, and it doesn't.
+Spotify requires the `playlist-read-private` scope to read a playlist's
+contents — for *every* playlist, public ones included. The app key above uses
+the *client credentials* flow, which carries no scopes at all, so it can never
+read a playlist's tracks no matter how public that playlist is.
+
+The scope is necessary but not sufficient: the endpoint also only serves
+playlists **you own**. See [What still won't have a
+list](#what-still-wont-have-a-list).
 
 So playlists need a real login, once:
 
@@ -103,17 +105,25 @@ access — albums and shows keep working, playlists stop. Re-run the script.
 
 ## What still won't have a list
 
-Spotify's own algorithmic and editorial playlists — Discover Weekly, Daily Mix,
-Release Radar, "This Is …", most things with an ID starting `37i9dQZF1D` — are
-closed to third-party apps. Requests for them come back `403` (or `404`) even
-when you're logged in. Mello detects that, stops retrying, and says "Spotify
-keeps its own playlists private". Copy such a mix into a playlist of your own
-and add that instead.
+On **11 February 2026** Spotify deprecated `/v1/playlists/{id}/tracks` (it now
+returns `403` for everyone) and replaced it with `/v1/playlists/{id}/items`,
+which is *only* accessible for *playlists you own or collaborate on*. Mello uses
+the new endpoint.
 
-The other case no login can fix is a playlist someone else made and never
-shared with you — if it isn't visible in your own Spotify account, no app can
-read it. Everything visible to your account works: your own playlists, private
-or public, and playlists you've saved or followed from other people.
+So the rule for playlists is ownership, not privacy:
+
+| Playlist | Track list? |
+|---|---|
+| Yours, private or public | yes |
+| One you collaborate on | yes |
+| Someone else's, even public | **no** — `403` |
+| Spotify editorial (`37i9dQZF1D…`) | **no** — `403` |
+
+Albums and podcast shows are unaffected by all of this and need no login.
+
+For anything in the "no" rows, copy the tracks into a playlist of your own and
+add that instead — as the owner you'll get the list. Mello detects the `403`,
+stops retrying, and says "Spotify only shares your own playlists".
 
 ## Podcasts
 

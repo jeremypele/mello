@@ -84,9 +84,11 @@ def test_empty_list_explains_which_problem_it_is():
     """Three different dead ends, three different things to do about them."""
     r = _renderer()
 
-    # Spotify refuses this list outright: don't promise a retry.
+    # Spotify refuses this list outright: don't promise a retry. Since Feb 2026
+    # it only shares a playlist's contents with the account that owns it, so
+    # the message has to point at ownership, not at privacy.
     refused = _words(r._build_track_list_content(_track_context(track_unavailable=True)))
-    assert 'private' in refused
+    assert 'your own playlists' in refused
     assert 'Retrying' not in refused
 
     # Shared client ID: the wait is not the fix, an own key is.

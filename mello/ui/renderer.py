@@ -1060,14 +1060,16 @@ class Renderer:
         """The full track list, current song in accent. Tap one to jump to it."""
         if not ctx.track_list:
             if ctx.track_unavailable:
-                # Spotify's own algorithmic playlists are closed to third-party
-                # apps. Retrying is pointless, so don't imply that it might work.
+                # Since Feb 2026 Spotify only shares a playlist's contents with
+                # the account that owns it. Someone else's playlist and an
+                # editorial one both land here, and retrying fixes neither, so
+                # don't imply that it might work.
                 return [('text', 'No list for this one'),
                         ('spacer',),
-                        ('text', "Spotify keeps its own"),
-                        ('text', 'playlists private'),
+                        ('text', 'Spotify only shares'),
+                        ('text', 'your own playlists'),
                         ('spacer',),
-                        ('footer', 'Albums and your playlists work')]
+                        ('footer', 'Albums and shows always work')]
             if ctx.track_cooldown_s > 0:
                 mins = int(ctx.track_cooldown_s // 60)
                 wait = f'{mins} min' if mins else f'{int(ctx.track_cooldown_s)} sec'
