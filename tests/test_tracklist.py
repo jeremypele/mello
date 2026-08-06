@@ -16,7 +16,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from mello.api.tracklist import (
-    MAX_TRACKS, Track, TrackListStore, parse_context, parse_episode, _parse_items,
+    API_BASE, MAX_TRACKS, Track, TrackListStore, parse_context, parse_episode,
+    _endpoint, _parse_items,
 )
 
 ALBUM = 'spotify:album:0ETFjACtuP2ADo6LFhL6HN'
@@ -61,17 +62,32 @@ def test_album_items_parsed():
         Track(uri='spotify:track:1', name='Come Together', artist='The Beatles')]
 
 
-def test_playlist_items_are_wrapped():
-    """Playlist responses nest the track one level deeper than albums."""
-    items = [{'added_at': 'x', 'track': {'uri': 'spotify:track:2', 'name': 'Dreams',
-                                         'artists': [{'name': 'Fleetwood Mac'}]}}]
+def test_playlist_items_are_wrapped_under_item():
+    """The real /items shape, keys copied from a live device response.
+
+    /playlists/{id}/items calls the wrapper 'item'. Reading 'track' here (what
+    the deprecated endpoint used) silently yields an EMPTY list rather than an
+    error — indistinguishable from an empty playlist, which is why this is
+    pinned to an actual observed payload.
+    """
+    items = [{'added_at': 'x', 'added_by': {}, 'is_local': False,
+              'primary_color': None, 'video_thumbnail': {},
+              'item': {'uri': 'spotify:track:2', 'name': 'Dreams',
+                       'artists': [{'name': 'Fleetwood Mac'}]}}]
+    parsed = _parse_items('playlist', items)
+    assert [(t.name, t.artist) for t in parsed] == [('Dreams', 'Fleetwood Mac')]
+
+
+def test_playlist_items_still_accept_the_old_track_key():
+    """Belt and braces: a shape surprise must degrade to working, not to empty."""
+    items = [{'track': {'uri': 'spotify:track:2', 'name': 'Dreams', 'artists': []}}]
     assert _parse_items('playlist', items)[0].name == 'Dreams'
 
 
 def test_null_and_local_entries_skipped():
     """Removed tracks and local files come back as null and must not crash."""
-    items = [{'track': None}, {'track': {'name': 'No URI'}},
-             {'track': {'uri': 'spotify:track:3', 'name': 'Real'}}]
+    items = [{'item': None}, {'item': {'name': 'No URI'}},
+             {'item': {'uri': 'spotify:track:3', 'name': 'Real'}}]
     parsed = _parse_items('playlist', items)
     assert [t.name for t in parsed] == ['Real']
 
@@ -808,6 +824,45 @@ class TestPlaylistInfo:
         get.assert_not_called()
 
 
+class TestPlaylistEndpoint:
+    """Spotify deprecated /playlists/{id}/tracks on 11 Feb 2026; it now 403s.
+
+    Verified on the device with a valid playlist-read-private token:
+        /tracks -> 403 {"error": {"status": 403, "message": "Forbidden"}}
+        /items  -> 200, keys=[added_at, added_by, is_local, item, ...]
+
+    A logged-in token was necessary but not sufficient — the endpoint had moved.
+    Pinning the path here because nothing else in the suite would notice: the
+    403 surfaced as "no list for this one", which is also what a genuinely
+    closed playlist looks like.
+    """
+
+    def test_playlists_use_the_items_endpoint(self):
+        assert _endpoint('playlist', 'abc') == f'{API_BASE}/playlists/abc/items'
+
+    def test_the_deprecated_tracks_path_is_gone(self):
+        assert not _endpoint('playlist', 'abc').endswith('/tracks')
+
+    @pytest.mark.parametrize('kind, suffix', [
+        ('album', '/albums/abc/tracks'),
+        ('show', '/shows/abc/episodes'),
+    ])
+    def test_albums_and_shows_are_untouched(self, kind, suffix):
+        """Only the playlist endpoint moved — don't 'fix' the working ones."""
+        assert _endpoint(kind, 'abc') == API_BASE + suffix
+
+    def test_the_fetched_url_is_the_items_one(self, tmp_path):
+        store = TrackListStore(cache_dir=tmp_path / 'tracks', token_url='x',
+                               client_id='id', client_secret='secret')
+        page = {'items': [{'item': {'uri': 'spotify:track:1', 'name': 'One',
+                                    'artists': []}}], 'next': None}
+        with patch('mello.api.tracklist.requests.post',
+                   return_value=_resp(200, {'access_token': 't', 'expires_in': 3600})), \
+             patch('mello.api.tracklist.requests.get', return_value=_resp(200, page)) as get:
+            assert [t.name for t in store.fetch(PLAYLIST)] == ['One']
+        assert get.call_args.args[0].endswith('/items')
+
+
 def _accounts_post(refresh_status=200, refresh_payload=None):
     """Fake token endpoints that answer each grant differently.
 
@@ -841,8 +896,8 @@ class TestLoggedIn:
     mello-login.py can.
     """
 
-    PLAYLIST_PAGE = {'items': [{'track': {'uri': 'spotify:track:1', 'name': 'One',
-                                          'artists': [{'name': 'Gims'}]}}], 'next': None}
+    PLAYLIST_PAGE = {'items': [{'item': {'uri': 'spotify:track:1', 'name': 'One',
+                                         'artists': [{'name': 'Gims'}]}}], 'next': None}
 
     @pytest.fixture
     def logged_in(self, tmp_path):

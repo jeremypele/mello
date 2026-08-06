@@ -15,11 +15,13 @@ plan.
 The fix is your own Spotify app (client ID + secret in .env), which gets its
 own quota. See docs/spotify-api.md. That app-only token covers albums and shows.
 
-Playlists need one thing more: Spotify requires the playlist-read-private scope
-on /playlists/{id}/tracks for *every* playlist, public ones included, and an
-app-only token carries no scopes at all. So playlist track lists need a real
-login — mello-login.py, once — after which the refresh token in .env keeps it
-going. Without it, playlists 403 no matter who owns them.
+Playlists need two things more. They need the playlist-read-private scope, which
+an app-only token cannot carry at all, so they need a real login —
+mello-login.py, once, after which the refresh token in .env keeps it going. And
+since 11 Feb 2026 they need the /playlists/{id}/items endpoint: the old /tracks
+one is deprecated and answers 403 for everyone. /items serves only playlists the
+account owns or collaborates on, so someone else's playlist has no list even
+when it's public and even when logged in.
 
 Requests go straight to api.spotify.com rather than through the daemon's
 /web-api proxy, because that proxy discards Spotify's Retry-After header.
@@ -43,7 +45,7 @@ logger = logging.getLogger(__name__)
 API_BASE = 'https://api.spotify.com/v1'
 ACCOUNTS_TOKEN_URL = 'https://accounts.spotify.com/api/token'
 
-# Spotify caps page size at 50 for album tracks, 100 for playlist items.
+# Spotify caps page size at 50 on every endpoint we use.
 PAGE_SIZE = 50
 
 # ponytail: hard cap so a 5000-track playlist can't eat the SD card or the
@@ -99,7 +101,10 @@ def parse_episode(episode_uri: str) -> Optional[str]:
 def _endpoint(kind: str, spotify_id: str) -> str:
     return {
         'album': f'{API_BASE}/albums/{spotify_id}/tracks',
-        'playlist': f'{API_BASE}/playlists/{spotify_id}/tracks',
+        # /playlists/{id}/tracks was deprecated on 11 Feb 2026 and now answers
+        # 403 for everyone. /items replaces it — different response shape too,
+        # see _parse_items.
+        'playlist': f'{API_BASE}/playlists/{spotify_id}/items',
         'show': f'{API_BASE}/shows/{spotify_id}/episodes',
     }[kind]
 
@@ -108,8 +113,11 @@ def _parse_items(kind: str, items: list) -> List[Track]:
     """Normalise the three response shapes into Tracks, skipping dead entries."""
     tracks = []
     for raw in items:
-        # Playlist items wrap the track; albums and shows don't.
-        entry = raw.get('track') if kind == 'playlist' else raw
+        # Playlist items wrap the track; albums and shows don't. /items calls
+        # that wrapper 'item' where the old /tracks endpoint called it 'track' —
+        # accept either, because reading the wrong key yields an EMPTY list
+        # rather than an error, which looks like an empty playlist to the user.
+        entry = (raw.get('item') or raw.get('track')) if kind == 'playlist' else raw
         if not isinstance(entry, dict) or not entry.get('uri'):
             continue  # local files and removed tracks come back as null
         artists = entry.get('artists') or []
@@ -631,8 +639,9 @@ class TrackListStore:
             self._unavailable.add(context_uri)
         logger.info(
             f'Track list unavailable: Spotify returned {status_code} for '
-            f'{context_uri[:45]} even from the account\'s own session — one of '
-            f'Spotify\'s own editorial playlists, closed to every app'
+            f'{context_uri[:45]} even from the account\'s own session — either '
+            f'a playlist this account neither owns nor collaborates on, or one '
+            f'of Spotify\'s own editorial ones. Both are closed to every app.'
         )
 
     def _get_json(self, url: str, headers: dict, params: Optional[dict], quota: str) -> Optional[dict]:
