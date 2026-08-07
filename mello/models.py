@@ -1,8 +1,9 @@
 """
 Mello Data Models - Core data structures.
 """
+import datetime
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional, List, Literal
 
@@ -17,6 +18,75 @@ class MenuState(Enum):
     VOLUME_LEVELS = auto()
     TRACK_LIST = auto()
     BEDTIME_LIST = auto()
+    ALARM_LIST = auto()
+    ALARM_EDIT = auto()
+
+
+DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+@dataclass
+class Alarm:
+    """One alarm. Recurring by weekday, or a one-shot pinned to a date.
+
+    A recurring alarm is `days` + a time and rings forever. A one-shot resolves
+    its chosen days to a single `date` when it is saved, so a missed one expires
+    instead of ambushing the family a week later. `days` is still kept on a
+    one-shot because it is what the editor's chips show.
+    """
+    id: str
+    hour: int
+    minute: int
+    days: List[int] = field(default_factory=list)  # 0=Mon .. 6=Sun
+    repeat: bool = True
+    enabled: bool = True
+    sound: str = 'marimba'
+    date: Optional[str] = None       # 'YYYY-MM-DD', one-shots only
+
+    @property
+    def time_label(self) -> str:
+        return f'{self.hour:02d}:{self.minute:02d}'
+
+    @property
+    def days_label(self) -> str:
+        """How the alarm's schedule reads on a list row."""
+        if not self.repeat:
+            if not self.date:
+                return 'Once'
+            d = datetime.date.fromisoformat(self.date)
+            return f'{DAY_NAMES[d.weekday()]} {d.day} {MONTH_NAMES[d.month - 1]}'
+        days = sorted(set(self.days))
+        if not days or len(days) == 7:
+            return 'Every day'
+        if days == [0, 1, 2, 3, 4]:
+            return 'Weekdays'
+        if days == [5, 6]:
+            return 'Weekend'
+        return ' '.join(DAY_NAMES[d] for d in days)
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id, 'hour': self.hour, 'minute': self.minute,
+            'days': list(self.days), 'repeat': self.repeat,
+            'enabled': self.enabled, 'sound': self.sound, 'date': self.date,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Alarm':
+        """Build from stored JSON, clamping anything a hand-edit could break."""
+        days = [int(d) for d in data.get('days', []) if isinstance(d, int) and 0 <= d <= 6]
+        return cls(
+            id=str(data.get('id', '')),
+            hour=max(0, min(23, int(data.get('hour', 7)))),
+            minute=max(0, min(59, int(data.get('minute', 0)))),
+            days=days,
+            repeat=bool(data.get('repeat', True)),
+            enabled=bool(data.get('enabled', True)),
+            sound=str(data.get('sound') or 'marimba'),
+            date=data.get('date'),
+        )
 
 
 @dataclass

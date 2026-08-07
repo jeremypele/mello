@@ -81,6 +81,18 @@ class VolumeController:
         logger.info(f'Volume: {self.pct}% (speaker={self.speaker_level}, bt={self.bt_level})')
         run_async(set_system_volume, self.speaker_level)
 
+    def set_alarm_level(self, pct: int):
+        """Drive the speaker at an explicit percentage, leaving the slider alone.
+
+        An alarm must be audible whatever the slider was left on, so it maps its
+        own ramp onto the band instead of reading `pct`. Still bounded by the
+        parental ceiling — loud enough to wake, never louder than allowed.
+        """
+        floor = VOLUME_FLOOR.get('speaker', 0)
+        ceiling = max(floor, self.settings.get_max_volume('speaker'))
+        level = round(floor + (ceiling - floor) * max(0, min(100, pct)) / 100)
+        run_async(set_system_volume, level)
+
     def mute(self):
         """Mute audio output instantly via ALSA hardware. No-op if already muted."""
         if self._muted:

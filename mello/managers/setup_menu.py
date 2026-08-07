@@ -3,6 +3,7 @@ Setup Menu - WiFi management and library reset.
 
 Extracted from app.py to keep system-admin concerns separate from the player.
 """
+import datetime
 import json
 import time
 import logging
@@ -14,8 +15,10 @@ import shutil
 
 from pathlib import Path
 
-from ..config import CATALOG_PATH, IMAGES_DIR, LIBRESPOT_STATE_PATH, SETTINGS_PATH
-from ..models import MenuState
+from ..config import (ALARM_MINUTE_STEP, CATALOG_PATH, IMAGES_DIR,
+                      LIBRESPOT_STATE_PATH, SETTINGS_PATH)
+from ..models import Alarm, MenuState
+from .alarms import cycle_sound, new_alarm, resolve_date
 
 _REPO_DIR = str(Path(__file__).resolve().parent.parent.parent)
 
@@ -38,9 +41,11 @@ class SetupMenu:
         bluetooth_manager=None,
         on_volume_preview: Optional[Callable[[str, int], None]] = None,
         on_play_track: Optional[Callable[[int], None]] = None,
+        alarm_manager=None,
     ):
         self.catalog_manager = catalog_manager
         self.settings = settings
+        self.alarms = alarm_manager
         self._on_toast = on_toast
         self._on_invalidate = on_invalidate
         self._on_library_cleared = on_library_cleared
@@ -58,6 +63,12 @@ class SetupMenu:
         # Reset confirmation state
         self._reset_confirm_pending: bool = False
         self._reset_confirm_time: float = 0.0
+
+        # Alarm editing. The edited alarm is the live object from the manager's
+        # list, so every tap persists as it happens — there is no Save row, the
+        # same as every other setting on this device.
+        self.alarm_edit: Optional[Alarm] = None
+        self.alarm_delete_pending: bool = False
 
         # Manual update state
         self._update_available: bool = False
@@ -117,6 +128,12 @@ class SetupMenu:
                 self.state = MenuState.WIFI_LIST
                 self.scroll_offset = 0
                 self._on_invalidate()
+            elif self.state == MenuState.ALARM_EDIT:
+                # Back goes to the list, not out of alarms entirely.
+                self._close_alarm_edit()
+                self.state = MenuState.ALARM_LIST
+                self.scroll_offset = 0
+                self._on_invalidate()
             else:
                 # All other submenus → back to main
                 if self.state == MenuState.BT_LIST and self.bluetooth:
@@ -130,6 +147,10 @@ class SetupMenu:
             self._handle_volume_tap(button_rects, x, y)
         elif self.state == MenuState.BEDTIME_LIST:
             self._handle_bedtime_tap(button_rects, x, y)
+        elif self.state == MenuState.ALARM_LIST:
+            self._handle_alarm_list_tap(button_rects, x, y)
+        elif self.state == MenuState.ALARM_EDIT:
+            self._handle_alarm_edit_tap(button_rects, x, y)
         elif self.state == MenuState.TRACK_LIST:
             self._handle_track_list_tap(button_rects, x, y)
         elif self.state == MenuState.BT_LIST:
@@ -174,6 +195,10 @@ class SetupMenu:
             elif 'quiet_end' in button_rects and button_rects['quiet_end'].collidepoint(x, y):
                 self.settings.cycle_quiet_end()
                 self._on_toast(f'Wake: {self.settings.quiet_end_label}')
+                self._on_invalidate()
+            elif 'alarms' in button_rects and button_rects['alarms'].collidepoint(x, y):
+                self.state = MenuState.ALARM_LIST
+                self.scroll_offset = 0
                 self._on_invalidate()
             elif 'bedtime_album' in button_rects and button_rects['bedtime_album'].collidepoint(x, y):
                 self.state = MenuState.BEDTIME_LIST
@@ -346,6 +371,113 @@ class SetupMenu:
                 self.scroll_offset = 0
                 self._on_invalidate()
             break
+
+    # ------------------------------------------------------------------
+    # Alarms
+    # ------------------------------------------------------------------
+
+    def _handle_alarm_list_tap(self, button_rects: dict, x: int, y: int):
+        """Add a new alarm, arm/disarm one, or open one for editing."""
+        if not self.alarms:
+            return
+
+        if 'alarm_add' in button_rects and button_rects['alarm_add'].collidepoint(x, y):
+            alarm = new_alarm()
+            self.alarms.add(alarm)
+            self._open_alarm_edit(alarm)
+            return
+
+        for key, rect in button_rects.items():
+            if not rect.collidepoint(x, y):
+                continue
+            if key.startswith('alarm_toggle_'):
+                self.alarms.toggle(key[len('alarm_toggle_'):])
+                self._on_invalidate()
+                return
+            if key.startswith('alarm_open_'):
+                alarm_id = key[len('alarm_open_'):]
+                found = next((a for a in self.alarms.alarms if a.id == alarm_id), None)
+                if found is not None:
+                    self._open_alarm_edit(found)
+                return
+
+    def _handle_alarm_edit_tap(self, button_rects: dict, x: int, y: int):
+        """Every tap here edits the live alarm and saves immediately."""
+        alarm = self.alarm_edit
+        if alarm is None or not self.alarms:
+            return
+
+        hit = next((k for k, r in button_rects.items() if r.collidepoint(x, y)), None)
+        if hit is None:
+            return
+
+        # Any tap that isn't Delete cancels a pending delete confirmation.
+        if hit != 'alarm_delete' and self.alarm_delete_pending:
+            self.alarm_delete_pending = False
+
+        if hit == 'alarm_hour_plus':
+            alarm.hour = (alarm.hour + 1) % 24
+        elif hit == 'alarm_hour_minus':
+            alarm.hour = (alarm.hour - 1) % 24
+        elif hit == 'alarm_minute_plus':
+            alarm.minute = (alarm.minute + ALARM_MINUTE_STEP) % 60
+        elif hit == 'alarm_minute_minus':
+            alarm.minute = (alarm.minute - ALARM_MINUTE_STEP) % 60
+        elif hit.startswith('alarm_day_'):
+            day = int(hit.rsplit('_', 1)[1])
+            if day in alarm.days:
+                alarm.days.remove(day)
+            else:
+                alarm.days.append(day)
+            alarm.days.sort()
+        elif hit == 'alarm_repeat':
+            alarm.repeat = not alarm.repeat
+        elif hit == 'alarm_sound':
+            alarm.sound = cycle_sound(alarm.sound)
+            self.alarms.preview(alarm.sound)   # hear it, don't guess from the name
+        elif hit == 'alarm_delete':
+            if self.alarm_delete_pending:
+                self.alarm_delete_pending = False
+                self.alarms.remove(alarm.id)
+                self.alarm_edit = None
+                self.state = MenuState.ALARM_LIST
+                self.scroll_offset = 0
+                self._on_toast('Alarm deleted')
+                self._on_invalidate()
+                return
+            self.alarm_delete_pending = True
+            self._reset_confirm_time = time.time()
+            self._on_invalidate()
+            return
+        else:
+            return
+
+        # Editing a disabled alarm is a clear intent to use it again.
+        alarm.enabled = True
+        self.alarms.save_edit(alarm)
+        self._on_invalidate()
+
+    def _open_alarm_edit(self, alarm):
+        self.alarm_edit = alarm
+        self.alarm_delete_pending = False
+        self.state = MenuState.ALARM_EDIT
+        self.scroll_offset = 0
+        self._on_invalidate()
+
+    def _close_alarm_edit(self):
+        self.alarm_edit = None
+        self.alarm_delete_pending = False
+
+    @property
+    def alarm_edit_when(self) -> Optional[str]:
+        """Which date a one-shot being edited will actually land on."""
+        alarm = self.alarm_edit
+        if alarm is None or alarm.repeat:
+            return None
+        return Alarm(id='', hour=alarm.hour, minute=alarm.minute,
+                     days=alarm.days, repeat=False,
+                     date=resolve_date(alarm.hour, alarm.minute, alarm.days,
+                                       datetime.datetime.now())).days_label
 
     def show_track_list(self):
         """Open the track list for whatever is playing (from the cover button)."""
