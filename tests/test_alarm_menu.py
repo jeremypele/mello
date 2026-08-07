@@ -58,9 +58,10 @@ def _menu(alarms=None):
 
 
 def _editing(alarm):
+    """Open the editor on `alarm`. Returns the draft, not the stored object."""
     menu, manager, player = _menu([alarm])
     menu._open_alarm_edit(alarm)
-    return menu, manager, player
+    return menu, manager, player, menu.alarm_edit
 
 
 def tap(menu, key, *others):
@@ -69,14 +70,40 @@ def tap(menu, key, *others):
 
 # --- List ---
 
-def test_add_creates_an_alarm_and_opens_it():
+def test_add_opens_a_draft_without_creating_anything():
     menu, manager, _ = _menu()
     menu.state = MenuState.ALARM_LIST
     tap(menu, 'alarm_add')
 
-    assert len(manager.alarms) == 1
     assert menu.state == MenuState.ALARM_EDIT
-    assert menu.alarm_edit is manager.alarms[0]
+    assert menu.alarm_edit is not None
+    assert menu.alarm_is_new is True
+    assert manager.alarms == [], 'Add must not create an alarm until Save'
+
+
+def test_backing_out_of_a_new_alarm_leaves_nothing_behind():
+    menu, manager, _ = _menu()
+    menu.state = MenuState.ALARM_LIST
+    tap(menu, 'alarm_add')
+    tap(menu, 'alarm_hour_plus')
+    tap(menu, 'close')
+
+    assert manager.alarms == []
+    assert menu.alarm_edit is None
+    assert menu.state == MenuState.ALARM_LIST
+
+
+def test_saving_a_new_alarm_commits_it():
+    menu, manager, _ = _menu()
+    menu.state = MenuState.ALARM_LIST
+    tap(menu, 'alarm_add')
+    tap(menu, 'alarm_hour_plus')
+    tap(menu, 'alarm_save')
+
+    assert len(manager.alarms) == 1
+    assert manager.alarms[0].hour == 8
+    assert menu.state == MenuState.ALARM_LIST
+    assert menu.alarm_edit is None
 
 
 def test_toggle_arms_and_disarms_without_opening_the_editor():
@@ -99,7 +126,9 @@ def test_tapping_a_row_opens_that_alarm():
     menu.state = MenuState.ALARM_LIST
 
     tap(menu, 'alarm_open_bb')
-    assert menu.alarm_edit is second
+    assert menu.alarm_edit is not None
+    assert menu.alarm_edit.id == 'bb'
+    assert menu.alarm_edit is not second, 'editor must hold a copy, not the live alarm'
 
 
 # --- Time stepping ---
@@ -112,9 +141,10 @@ def test_tapping_a_row_opens_that_alarm():
 ])
 def test_hour_steps_and_wraps(key, start, expected):
     alarm = Alarm(id='aa', hour=start, minute=0, days=[0], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, draft = _editing(alarm)
     tap(menu, key)
-    assert alarm.hour == expected
+    assert draft.hour == expected
+    assert alarm.hour == start, 'stored alarm changed before Save'
 
 
 @pytest.mark.parametrize('key,start,expected', [
@@ -125,79 +155,87 @@ def test_hour_steps_and_wraps(key, start, expected):
 ])
 def test_minute_steps_by_five_and_wraps(key, start, expected):
     alarm = Alarm(id='aa', hour=7, minute=start, days=[0], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, draft = _editing(alarm)
     tap(menu, key)
-    assert alarm.minute == expected
+    assert draft.minute == expected
+    assert alarm.minute == start, 'stored alarm changed before Save'
 
 
 def test_minute_wrap_does_not_change_the_hour():
     alarm = Alarm(id='aa', hour=7, minute=55, days=[0], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, draft = _editing(alarm)
     tap(menu, 'alarm_minute_plus')
-    assert (alarm.hour, alarm.minute) == (7, 0)
+    assert (draft.hour, draft.minute) == (7, 0)
 
 
 # --- Days, repeat, sound ---
 
 def test_day_chip_toggles_on_and_off():
     alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, draft = _editing(alarm)
 
     tap(menu, 'alarm_day_5')
-    assert alarm.days == [0, 5]
+    assert draft.days == [0, 5]
 
     tap(menu, 'alarm_day_0')
-    assert alarm.days == [5]
+    assert draft.days == [5]
+    assert alarm.days == [0], 'chip taps leaked into the stored alarm'
 
 
 def test_days_stay_sorted_however_they_are_tapped():
     alarm = Alarm(id='aa', hour=7, minute=0, days=[], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, draft = _editing(alarm)
     for day in (4, 0, 2):
         tap(menu, f'alarm_day_{day}')
-    assert alarm.days == [0, 2, 4]
+    assert draft.days == [0, 2, 4]
 
 
 def test_repeat_toggle_pins_a_date_when_switched_off():
     alarm = Alarm(id='aa', hour=9, minute=0, days=[5], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, manager, _, draft = _editing(alarm)
 
     tap(menu, 'alarm_repeat')
-    assert alarm.repeat is False
-    assert alarm.date is not None      # resolved to a real day, not left floating
+    assert draft.repeat is False
+    tap(menu, 'alarm_save')
+    saved = manager.alarms[0]
+    assert saved.repeat is False
+    assert saved.date is not None      # resolved to a real day, not left floating
 
 
 def test_repeat_toggle_clears_the_date_when_switched_back_on():
     alarm = Alarm(id='aa', hour=9, minute=0, days=[5], repeat=False,
                   date='2026-08-08')
-    menu, _, _ = _editing(alarm)
+    menu, manager, _, draft = _editing(alarm)
 
     tap(menu, 'alarm_repeat')
-    assert alarm.repeat is True
-    assert alarm.date is None
+    tap(menu, 'alarm_save')
+    saved = manager.alarms[0]
+    assert saved.repeat is True
+    assert saved.date is None
 
 
 def test_sound_cycles_and_plays_a_preview():
     alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True, sound='marimba')
-    menu, _, player = _editing(alarm)
+    menu, _, player, draft = _editing(alarm)
 
     tap(menu, 'alarm_sound')
-    assert alarm.sound == 'riser'
+    assert draft.sound == 'riser'
     assert player.plays == ['riser'], 'the Sound row must be audible, not just a label'
 
 
 def test_editing_a_disarmed_alarm_arms_it():
     alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True, enabled=False)
-    menu, _, _ = _editing(alarm)
+    menu, manager, _, _ = _editing(alarm)
     tap(menu, 'alarm_hour_plus')
-    assert alarm.enabled is True
+    tap(menu, 'alarm_save')
+    assert manager.alarms[0].enabled is True
 
 
 # --- Delete ---
 
 def test_delete_asks_before_it_deletes():
     alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True)
-    menu, manager, _ = _editing(alarm)
+    menu, manager, _, _ = _editing(alarm)
 
     tap(menu, 'alarm_delete')
     assert menu.alarm_delete_pending is True
@@ -211,7 +249,7 @@ def test_delete_asks_before_it_deletes():
 
 def test_any_other_tap_cancels_a_pending_delete():
     alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True)
-    menu, manager, _ = _editing(alarm)
+    menu, manager, _, _ = _editing(alarm)
 
     tap(menu, 'alarm_delete')
     tap(menu, 'alarm_hour_plus')
@@ -225,7 +263,7 @@ def test_any_other_tap_cancels_a_pending_delete():
 
 def test_back_from_the_editor_returns_to_the_list():
     alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, _ = _editing(alarm)
 
     tap(menu, 'close')
     assert menu.state == MenuState.ALARM_LIST
@@ -250,7 +288,7 @@ def test_settings_row_opens_the_alarm_list():
 
 def test_editor_reports_the_date_a_one_shot_will_land_on():
     alarm = Alarm(id='aa', hour=9, minute=0, days=[5], repeat=False)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, _ = _editing(alarm)
 
     label = menu.alarm_edit_when
     assert label is not None
@@ -260,5 +298,62 @@ def test_editor_reports_the_date_a_one_shot_will_land_on():
 
 def test_editor_reports_no_date_for_a_repeating_alarm():
     alarm = Alarm(id='aa', hour=9, minute=0, days=[5], repeat=True)
-    menu, _, _ = _editing(alarm)
+    menu, _, _, _ = _editing(alarm)
     assert menu.alarm_edit_when is None
+
+
+# --- Draft isolation: the reason the editor holds a copy ---
+
+def test_backing_out_discards_edits_to_an_existing_alarm():
+    alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True, sound='marimba')
+    menu, manager, _, _ = _editing(alarm)
+
+    tap(menu, 'alarm_hour_plus')
+    tap(menu, 'alarm_day_3')
+    tap(menu, 'alarm_sound')
+    tap(menu, 'close')
+
+    saved = manager.alarms[0]
+    assert (saved.hour, saved.days, saved.sound) == (7, [0], 'marimba')
+
+
+def test_saving_an_existing_alarm_replaces_it_rather_than_duplicating():
+    alarm = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True)
+    menu, manager, _, _ = _editing(alarm)
+
+    tap(menu, 'alarm_hour_plus')
+    tap(menu, 'alarm_save')
+
+    assert len(manager.alarms) == 1
+    assert manager.alarms[0].hour == 8
+
+
+def test_saving_keeps_the_alarm_in_its_original_position():
+    first = Alarm(id='aa', hour=7, minute=0, days=[0], repeat=True)
+    second = Alarm(id='bb', hour=8, minute=0, days=[1], repeat=True)
+    menu, manager, _ = _menu([first, second])
+    menu._open_alarm_edit(first)
+
+    tap(menu, 'alarm_minute_plus')
+    tap(menu, 'alarm_save')
+
+    assert [a.id for a in manager.alarms] == ['aa', 'bb']
+
+
+def test_a_draft_cannot_ring_before_it_is_saved():
+    menu, manager, _ = _menu()
+    menu.state = MenuState.ALARM_LIST
+    tap(menu, 'alarm_add')
+    assert manager.alarms == [], 'an unsaved draft is reachable by the fire check'
+
+
+def test_delete_on_a_draft_just_discards_it():
+    menu, manager, _ = _menu()
+    menu.state = MenuState.ALARM_LIST
+    tap(menu, 'alarm_add')
+    # Delete isn't drawn for a draft, but a stale rect must not corrupt the list.
+    tap(menu, 'alarm_delete')
+    tap(menu, 'alarm_delete')
+
+    assert manager.alarms == []
+    assert menu.state == MenuState.ALARM_LIST

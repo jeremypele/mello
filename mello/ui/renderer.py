@@ -1161,10 +1161,13 @@ class Renderer:
             ('separator',),
             ('button', 'alarm_sound', f'Sound: {alarm.sound.title()}', COLORS['bg_elevated']),
             ('separator',),
-            ('button', 'alarm_delete',
-             'Delete alarm?' if ctx.alarm_delete_pending else 'Delete alarm',
-             COLORS['error']),
+            ('button', 'alarm_save', 'Save', COLORS['accent']),
         ]
+        # A draft has nothing to delete — backing out already discards it.
+        if not ctx.alarm_is_new:
+            items.append(('button', 'alarm_delete',
+                          'Delete alarm?' if ctx.alarm_delete_pending else 'Delete alarm',
+                          COLORS['error']))
         return items
 
     def _build_bedtime_content(self, ctx: 'RenderContext') -> list:

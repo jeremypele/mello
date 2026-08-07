@@ -312,13 +312,23 @@ class AlarmManager:
             return
 
     def save_edit(self, alarm: Alarm, now: Optional[datetime.datetime] = None):
-        """Persist an edited alarm, pinning a one-shot to a concrete date."""
+        """Commit a draft from the editor, pinning a one-shot to a concrete date.
+
+        Takes the draft *by value*: it replaces the stored alarm with the same
+        id rather than assuming the editor was mutating the live object, so
+        backing out of the editor leaves the saved alarm untouched.
+        """
         now = now or datetime.datetime.now()
         if alarm.repeat:
             alarm.date = None
         else:
             alarm.date = resolve_date(alarm.hour, alarm.minute, alarm.days, now)
-        if alarm.id not in {a.id for a in self.alarms}:
+
+        for i, existing in enumerate(self.alarms):
+            if existing.id == alarm.id:
+                self.alarms[i] = alarm
+                break
+        else:
             self.alarms.append(alarm)
         self.settings.save_alarms()
         logger.info(f'Alarm saved: {alarm.time_label} ({alarm.days_label})')

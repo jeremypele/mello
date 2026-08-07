@@ -83,8 +83,17 @@ def test_alarm_edit_draws_every_control():
 
     expected = {'alarm_hour_minus', 'alarm_hour_plus',
                 'alarm_minute_minus', 'alarm_minute_plus',
-                'alarm_repeat', 'alarm_sound', 'alarm_delete'}
+                'alarm_repeat', 'alarm_sound', 'alarm_save', 'alarm_delete'}
     assert expected <= set(r.menu_button_rects)
+
+
+def test_a_new_draft_offers_save_but_not_delete():
+    r = _renderer()
+    r._draw_menu_frame(_ctx(menu_state=MenuState.ALARM_EDIT,
+                            alarm_edit=_alarms()[0], alarm_is_new=True))
+
+    assert 'alarm_save' in r.menu_button_rects
+    assert 'alarm_delete' not in r.menu_button_rects
 
 
 def test_alarm_edit_draws_seven_day_chips_that_do_not_overlap():

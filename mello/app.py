@@ -3098,6 +3098,7 @@ class Mello:
             alarm_edit=self.setup_menu.alarm_edit,
             alarm_edit_when=self.setup_menu.alarm_edit_when,
             alarm_delete_pending=self.setup_menu.alarm_delete_pending,
+            alarm_is_new=self.setup_menu.alarm_is_new,
             alarms_label=self._alarms_label(),
             bedtime_label=self._bedtime_label(),
             bedtime_uri=self.settings.bedtime_uri,

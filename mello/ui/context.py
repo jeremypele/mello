@@ -46,6 +46,7 @@ class RenderContext:
     alarm_edit: Optional[Alarm] = None       # the alarm open in the editor
     alarm_edit_when: Optional[str] = None    # resolved date, one-shots only
     alarm_delete_pending: bool = False       # Delete row is asking for confirmation
+    alarm_is_new: bool = False               # draft from Add, not yet in the list
     alarms_label: str = 'Off'                # armed count, on the Settings row
     bedtime_label: str = 'None'              # album still playable at bedtime
     bedtime_uri: Optional[str] = None
