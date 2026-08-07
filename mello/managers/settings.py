@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 
 from ..config import (SETTINGS_PATH, VOLUME_RANGE, VOLUME_ADJUST_STEP,
                       DEFAULT_MAX_VOLUME, VOLUME_FLOOR)
+from ..models import Alarm
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class Settings:
         self._max_volume: dict = {}      # {} = use DEFAULT_MAX_VOLUME
         self._volume_pct: int = 60       # a sane living-room level on first boot
         self._share_usage_data: bool = True  # Set once during install, not changeable via UI
+        self.alarms: list = []           # list[Alarm], see managers/alarms.py
         self._load()
 
     def _load(self):
@@ -63,6 +65,7 @@ class Settings:
                 self._last_bt_device_mac = data.get('last_bt_device_mac')
                 self._max_volume = self._read_max_volume(data)
                 self._volume_pct = max(0, min(100, int(data.get('volume_pct', 60))))
+                self.alarms = self._read_alarms(data)
                 if 'share_usage_data' in data:
                     self._share_usage_data = bool(data['share_usage_data'])
                 logger.info(f'Settings loaded: auto_pause={self._auto_pause_minutes}min, expiry={self._progress_expiry_hours}h')
@@ -84,9 +87,35 @@ class Settings:
             data['volume_pct'] = self._volume_pct
             if self._max_volume:
                 data['max_volume'] = self._max_volume
+            if self.alarms:
+                data['alarms'] = [a.to_dict() for a in self.alarms]
             self._path.write_text(json.dumps(data, indent=2))
         except Exception as e:
             logger.warning(f'Could not save settings: {e}')
+
+    # --- Alarms ---
+
+    @staticmethod
+    def _read_alarms(data: dict) -> list:
+        """Parse stored alarms, dropping any single entry that won't load.
+
+        Absent on every device that hasn't set one, which is the entire field
+        today — so this is the whole migration.
+        """
+        stored = data.get('alarms')
+        if not isinstance(stored, list):
+            return []
+        alarms = []
+        for entry in stored:
+            try:
+                alarms.append(Alarm.from_dict(entry))
+            except (TypeError, ValueError) as e:
+                logger.warning(f'Skipping unreadable alarm {entry!r}: {e}')
+        return alarms
+
+    def save_alarms(self):
+        """Persist after any add/edit/toggle/remove."""
+        self._save()
 
     # --- Usage data sharing (set once during install) ---
 

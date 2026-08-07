@@ -4,7 +4,7 @@ Render Context - Bundles all state needed for rendering.
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-from ..models import CatalogItem, MenuState, NowPlaying
+from ..models import Alarm, CatalogItem, MenuState, NowPlaying
 from ..managers.bluetooth import BluetoothDevice
 
 
@@ -39,6 +39,14 @@ class RenderContext:
     sleep_clock_text: Optional[str] = None   # 'HH:MM', None hides the sleep clock
     sleep_clock_drift: tuple = (0, 0)        # px offset, moves to avoid retention
     sleep_icon: Optional[str] = None         # 'moon' (bedtime) | 'sun' (ok to wake)
+    next_alarm_label: Optional[str] = None   # 'HH:MM' beside the sleep clock's bell
+    alarm_ringing: bool = False              # an alarm owns the screen right now
+    alarm_time_label: Optional[str] = None   # clock face shown while ringing
+    alarms: List[Alarm] = field(default_factory=list)
+    alarm_edit: Optional[Alarm] = None       # the alarm open in the editor
+    alarm_edit_when: Optional[str] = None    # resolved date, one-shots only
+    alarm_delete_pending: bool = False       # Delete row is asking for confirmation
+    alarms_label: str = 'Off'                # armed count, on the Settings row
     bedtime_label: str = 'None'              # album still playable at bedtime
     bedtime_uri: Optional[str] = None
     catalog_items: List[CatalogItem] = field(default_factory=list)  # unfiltered, for menus

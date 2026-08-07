@@ -151,6 +151,12 @@ class UsageTracker:
             return
         self._capture('device_wake', {})
 
+    def on_alarm(self, sound: str, repeat: bool):
+        """Call when an alarm starts ringing."""
+        if not self._enabled:
+            return
+        self._capture('alarm_fired', {'sound': sound, 'repeat': repeat})
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

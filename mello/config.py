@@ -217,6 +217,39 @@ QUIET_HOURS_WAKE_HOLD = 3.0
 WAKE_WINDOW_MINUTES = 90
 
 # ============================================
+# ALARMS
+# ============================================
+
+SOUNDS_DIR = Path(__file__).parent.parent / 'assets' / 'sounds'
+
+# Sound files (assets/sounds/<name>.wav), in the order the Sound row cycles.
+# All four are pre-normalised to the same loudness with their tails trimmed, so
+# nothing here needs to know one from another.
+ALARM_SOUNDS = ['marimba', 'riser', 'buzz', 'chime']
+
+# Minutes move in steps — a keyboardless screen makes 1-minute granularity a
+# lot of tapping for no real gain on a wake-up alarm.
+ALARM_MINUTE_STEP = 5
+
+# Give up ringing after this long unanswered — a set alarm must not blare into
+# an empty house all morning.
+ALARM_TIMEOUT = 5 * 60
+
+# Silence between one playthrough and the next. The sounds carry their own
+# internal rhythm, so this only separates repeats.
+ALARM_REPEAT_GAP = 0.5
+
+# The ring starts at this share of the speaker's usable band and climbs to 100%
+# over ALARM_RAMP_SECONDS. A child who sleeps through a steady tone does not
+# sleep through one that keeps getting louder.
+ALARM_START_VOLUME_PCT = 50
+ALARM_RAMP_SECONDS = 30.0
+
+# How far ahead the sleep clock's bell looks. Beyond this an alarm is not
+# "upcoming", it's just configured.
+ALARM_BELL_HORIZON_HOURS = 24
+
+# ============================================
 # AUTO-PAUSE COUNTDOWN
 # ============================================
 

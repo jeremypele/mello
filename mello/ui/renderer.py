@@ -12,7 +12,7 @@ import pygame.gfxdraw
 from .helpers import draw_aa_circle
 from .image_cache import ImageCache
 from .context import RenderContext
-from ..models import CatalogItem, MenuState, NowPlaying
+from ..models import DAY_NAMES, CatalogItem, MenuState, NowPlaying
 from ..config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, COLORS,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
@@ -49,6 +49,7 @@ class Renderer:
         self.font_medium = pygame.font.Font(None, 32)
         self.font_small = pygame.font.Font(None, 24)
         self.font_clock = pygame.font.Font(None, 340)  # sleep clock, readable across a dark room
+        self.font_alarm = pygame.font.Font(None, 72)   # next-alarm time beside the bell
         
         # Caches
         self._bg_cache: Optional[pygame.Surface] = None
@@ -130,6 +131,15 @@ class Renderer:
         
         Returns list of dirty rects for partial update, or None for full flip.
         """
+        # A ringing alarm owns the whole screen, above sleep and above the menu.
+        # It has to: "tap anywhere to dismiss" only works if nothing underneath
+        # can catch that tap and read it as "play this album".
+        if ctx.alarm_ringing:
+            self._clear_button_rects()
+            self._draw_alarm_ringing(ctx)
+            self._needs_full_redraw = True
+            return None
+
         # Sleep mode - dim clock (plain black if the clock can't be shown)
         if ctx.is_sleeping:
             self._clear_button_rects()
@@ -298,10 +308,65 @@ class Renderer:
             ctx.sleep_clock_text or '', self.font_clock, self._SLEEP_CLOCK_COLOR)
         self.screen.blit(surf, surf.get_rect(center=(cx, cy)))
 
+        # Glyphs stack "below" the clock from the user's view (decreasing
+        # physical X). Only what's present is drawn, so a bell with no moon
+        # moves up rather than floating under an empty slot.
+        glyph_x = cx - surf.get_width() // 2 - 70
         if ctx.sleep_icon:
-            # Sits "below" the clock from the user's view (small physical X)
-            icon_x = cx - surf.get_width() // 2 - 70
-            self._draw_sleep_icon(ctx.sleep_icon, icon_x, cy)
+            self._draw_sleep_icon(ctx.sleep_icon, glyph_x, cy)
+            glyph_x -= self._SLEEP_ICON_RADIUS + 60
+        if ctx.next_alarm_label:
+            self._draw_alarm_bell(glyph_x, cy, ctx.next_alarm_label)
+
+    def _draw_alarm_ringing(self, ctx: 'RenderContext'):
+        """Full-screen alarm face. Any tap anywhere gets rid of it."""
+        self.screen.fill(COLORS['bg_primary'])
+        cx, cy = SCREEN_WIDTH // 2, CAROUSEL_CENTER_Y
+
+        clock = self._render_text_rotated(
+            ctx.alarm_time_label or '', self.font_clock, COLORS['text_primary'])
+        self.screen.blit(clock, clock.get_rect(center=(cx, cy)))
+
+        self._draw_alarm_bell(cx - clock.get_width() // 2 - 80, cy, None,
+                              colour=COLORS['accent'])
+
+        hint = self._render_text_rotated('Tap anywhere to stop', self.font_medium,
+                                         COLORS['text_secondary'])
+        self.screen.blit(hint, hint.get_rect(
+            center=(cx - clock.get_width() // 2 - 170, cy)))
+
+    def _draw_alarm_bell(self, x: int, y: int, label: Optional[str],
+                         colour: Optional[tuple] = None):
+        """A bell, optionally followed by the time it will ring.
+
+        Built upright on one surface and rotated once, so the glyph and its
+        label can't drift apart. Drawn filled and chunky for the same reason
+        the sun's rays are thick — at a few percent backlight, thin shapes
+        simply vanish.
+        """
+        colour = colour or self._SLEEP_CLOCK_COLOR
+        r = self._SLEEP_ICON_RADIUS
+        size = r * 2
+
+        bell = pygame.Surface((size, size), pygame.SRCALPHA)
+        mid, body_r = size // 2, r * 2 // 3
+        # Dome plus a squared-off skirt: a circle alone reads as a moon.
+        pygame.draw.circle(bell, colour, (mid, mid - 2), body_r)
+        pygame.draw.rect(bell, colour, (mid - body_r, mid - 2, body_r * 2, body_r))
+        pygame.draw.rect(bell, colour, (mid - body_r - 6, mid + body_r - 4,
+                                        body_r * 2 + 12, 8), border_radius=4)
+        pygame.draw.circle(bell, colour, (mid, mid + body_r + 10), 6)
+
+        text = (self.font_alarm.render(label, True, colour) if label else None)
+        gap = 14
+        width = size + (gap + text.get_width() if text else 0)
+        strip = pygame.Surface((width, size), pygame.SRCALPHA)
+        strip.blit(bell, (0, 0))
+        if text:
+            strip.blit(text, (size + gap, (size - text.get_height()) // 2))
+
+        rotated = pygame.transform.rotate(strip, -90)
+        self.screen.blit(rotated, rotated.get_rect(center=(x, y)))
 
     def _draw_sleep_icon(self, icon: str, x: int, y: int):
         """Draw the moon (bedtime) or sun (ok to wake) below the sleep clock.
@@ -984,6 +1049,14 @@ class Renderer:
             title = 'Bedtime'
             nav_icon = 'back'
             items = self._build_bedtime_content(ctx)
+        elif ctx.menu_state == MenuState.ALARM_LIST:
+            title = 'Alarms'
+            nav_icon = 'back'
+            items = self._build_alarm_list_content(ctx)
+        elif ctx.menu_state == MenuState.ALARM_EDIT:
+            title = 'Alarm'
+            nav_icon = 'back'
+            items = self._build_alarm_edit_content(ctx)
         else:
             return
 
@@ -1026,6 +1099,8 @@ class Renderer:
             ('button', 'auto_pause', f'Auto-pause: {ctx.auto_pause_minutes} min', COLORS['bg_elevated']),
             ('button', 'progress_expiry', f'Remember: {ctx.progress_expiry_hours} hrs', COLORS['bg_elevated']),
             ('separator',),
+            ('button', 'alarms', f'Alarms: {ctx.alarms_label}', COLORS['bg_elevated']),
+            ('separator',),
             ('button', 'quiet_start', f'Bedtime: {ctx.quiet_start_label}', COLORS['bg_elevated']),
         ]
         # Wake time and bedtime album are meaningless with no bedtime set
@@ -1049,6 +1124,47 @@ class Renderer:
         ]
         if ctx.app_version_label:
             items.append(('footer', f'Version: {ctx.app_version_label}'))
+        return items
+
+    def _build_alarm_list_content(self, ctx: 'RenderContext') -> list:
+        """Every alarm, armed or not. Add sits on top so it never needs a scroll."""
+        items: list = [('button', 'alarm_add', '+ Add alarm', COLORS['bg_elevated'])]
+        if not ctx.alarms:
+            items += [('spacer',), ('text', 'No alarms yet')]
+        for alarm in ctx.alarms:
+            items.append(('separator',))
+            items.append(('alarm_row', alarm.id, alarm.time_label,
+                          alarm.days_label, alarm.enabled))
+        items.append(('footer', 'Alarms ring on the built-in speaker'))
+        return items
+
+    def _build_alarm_edit_content(self, ctx: 'RenderContext') -> list:
+        """One alarm. Every change saves as you make it — there is no Save row."""
+        alarm = ctx.alarm_edit
+        if alarm is None:
+            return []
+
+        items: list = [
+            ('step_row', 'alarm_hour', 'Hour', f'{alarm.hour:02d}'),
+            ('step_row', 'alarm_minute', 'Minute', f'{alarm.minute:02d}'),
+            ('separator',),
+            ('chips', alarm.days),
+            ('button', 'alarm_repeat',
+             f'Repeat: {"On" if alarm.repeat else "Off"}',
+             COLORS['accent'] if alarm.repeat else COLORS['bg_elevated']),
+        ]
+        # A one-shot's chips resolve to a real date. Showing which one, live,
+        # is the only way the parent can tell "Sat" means this Saturday.
+        if not alarm.repeat and ctx.alarm_edit_when:
+            items.append(('text', f'Rings once, {ctx.alarm_edit_when}'))
+        items += [
+            ('separator',),
+            ('button', 'alarm_sound', f'Sound: {alarm.sound.title()}', COLORS['bg_elevated']),
+            ('separator',),
+            ('button', 'alarm_delete',
+             'Delete alarm?' if ctx.alarm_delete_pending else 'Delete alarm',
+             COLORS['error']),
+        ]
         return items
 
     def _build_bedtime_content(self, ctx: 'RenderContext') -> list:
@@ -1193,7 +1309,8 @@ class Renderer:
     # the cursor must clear the *next* row's extent — hence extents, not advances.
     def _menu_row_extent(self, kind: str) -> int:
         H, GAP = self._MENU_BTN_H, self._MENU_BTN_GAP
-        if kind in ('button', 'track', 'vol_row', 'placeholder'):
+        if kind in ('button', 'track', 'vol_row', 'placeholder',
+                    'alarm_row', 'step_row', 'chips'):
             return H
         if kind == 'header':
             return 30
@@ -1277,6 +1394,54 @@ class Renderer:
                 plus_rect = pygame.Rect(x, Y + btn_w_vol + 5 + label_w_vol + 5, H, btn_w_vol)
                 self._draw_menu_button(plus_rect, '+', COLORS['bg_elevated'])
                 self.menu_button_rects[f'vol_plus_{i}_{output_type}'] = plus_rect
+
+            elif kind == 'alarm_row':
+                _, alarm_id, time_label, days_label, enabled = item
+                toggle_w = 90
+                label_w = W - toggle_w - 5
+
+                label_rect = pygame.Rect(x, Y, extent, label_w)
+                text_col = COLORS['text_primary'] if enabled else COLORS['text_muted']
+                self._draw_menu_button(label_rect, [time_label, days_label],
+                                       COLORS['bg_elevated'], text_col)
+                self.menu_button_rects[f'alarm_open_{alarm_id}'] = label_rect
+
+                # Arm/disarm without opening the alarm — the school-holiday case.
+                toggle_rect = pygame.Rect(x, Y + label_w + 5, extent, toggle_w)
+                self._draw_menu_button(
+                    toggle_rect, 'On' if enabled else 'Off',
+                    COLORS['accent'] if enabled else COLORS['bg_secondary'],
+                    COLORS['text_primary'] if enabled else COLORS['text_muted'])
+                self.menu_button_rects[f'alarm_toggle_{alarm_id}'] = toggle_rect
+
+            elif kind == 'step_row':
+                _, key, name, value = item
+                minus_rect = pygame.Rect(x, Y, extent, btn_w_vol)
+                self._draw_menu_button(minus_rect, '−', COLORS['bg_elevated'])
+                self.menu_button_rects[f'{key}_minus'] = minus_rect
+
+                label_rect = pygame.Rect(x, Y + btn_w_vol + 5, extent, label_w_vol)
+                pygame.draw.rect(self.screen, COLORS['bg_secondary'], label_rect, border_radius=18)
+                label_surf = self._render_text_rotated(
+                    f'{name}: {value}', self.font_medium, COLORS['text_primary'])
+                self.screen.blit(label_surf, label_surf.get_rect(center=label_rect.center))
+
+                plus_rect = pygame.Rect(x, Y + btn_w_vol + 5 + label_w_vol + 5, extent, btn_w_vol)
+                self._draw_menu_button(plus_rect, '+', COLORS['bg_elevated'])
+                self.menu_button_rects[f'{key}_plus'] = plus_rect
+
+            elif kind == 'chips':
+                selected = set(item[1])
+                gap = 6
+                chip_w = (W - gap * (len(DAY_NAMES) - 1)) // len(DAY_NAMES)
+                for day, name in enumerate(DAY_NAMES):
+                    chip = pygame.Rect(x, Y + day * (chip_w + gap), extent, chip_w)
+                    on = day in selected
+                    self._draw_menu_button(
+                        chip, name[0],
+                        COLORS['accent'] if on else COLORS['bg_elevated'],
+                        COLORS['text_primary'] if on else COLORS['text_muted'])
+                    self.menu_button_rects[f'alarm_day_{day}'] = chip
 
             elif kind == 'placeholder':
                 pass

@@ -25,6 +25,7 @@ from .config import (
     ACTION_DEBOUNCE, BUTTON_PRESS_DURATION, MENU_HOLD_TIME,
     CONTEXT_SWITCH_WATCHDOG_TIMEOUT,
     SLEEP_CLOCK_DRIFT, QUIET_HOURS_WAKE_HOLD, VOLUME_SLIDER_TIMEOUT,
+    ALARM_BELL_HORIZON_HOURS,
     TRACK_LIST_FETCH_DELAY, TRACK_LIST_RETRY_INTERVAL, TRACK_LIST_GATE_LOG_INTERVAL,
     POSTHOG_API_KEY, POSTHOG_HOST, ANALYTICS_DISTINCT_ID,
     ANALYTICS_INCLUDE_CONTENT, ANALYTICS_USE_MACHINE_ID,
@@ -34,6 +35,7 @@ from .api import LibrespotAPI, NullLibrespotAPI, CatalogManager, TrackListStore
 from .handlers import TouchHandler, EventListener, EvdevTouchHandler
 from .managers import SleepManager, SmoothCarousel, PlayTimer, PerformanceMonitor, AutoPauseManager, SetupMenu, Settings, UsageTracker, BluetoothManager, QuietHours
 from .managers.quiet_hours import clock_is_trusted
+from .managers.alarms import AlarmManager, next_upcoming
 from .api.tracklist import parse_context, parse_episode
 from .controllers import VolumeController, PlaybackController, is_repeatable_spotify_context
 from .ui import ImageCache, Renderer, RenderContext
@@ -263,6 +265,9 @@ class Mello:
         self.play_timer = PlayTimer()
         self.perf_monitor = PerformanceMonitor()
         self.volume = VolumeController(self.api, self.settings)
+        # Alarms drive the speaker directly while ringing — the ramp has to be
+        # able to get loud even if the slider was left at zero.
+        self.alarms = AlarmManager(self.settings, on_volume=self.volume.set_alarm_level)
         # Usage analytics (only enabled if user opted in during install)
         analytics_key = POSTHOG_API_KEY if self.settings.share_usage_data else ''
         self.tracker = UsageTracker(
@@ -402,6 +407,7 @@ class Mello:
             bluetooth_manager=self.bluetooth,
             on_volume_preview=self._preview_volume,
             on_play_track=self._play_track_at_index,
+            alarm_manager=self.alarms,
         )
         # Volume button hold tracking (3s hold opens setup menu)
         self._volume_hold_start: Optional[float] = None
@@ -1076,6 +1082,7 @@ class Mello:
                 # _update() doesn't run while asleep, so refresh bedtime here or
                 # the window would never open — and worse, never close.
                 self.quiet_hours.update()
+                self._check_alarms()
                 quiet = self.bedtime_locked
                 # Primary wake: evdev threading.Event (reliable across threads)
                 # Fallback: pygame.event.wait with timeout (catches KEYDOWN/QUIT)
@@ -1543,6 +1550,11 @@ class Mello:
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 logger.debug(f'Event: MOUSEBUTTONDOWN at {event.pos}')
+                # A ringing alarm swallows the tap. Without this the same touch
+                # would also land on whatever cover is underneath and start it.
+                if self.alarms.ringing:
+                    self._dismiss_alarm()
+                    continue
                 if self.sleep_manager.is_sleeping:
                     if self.bedtime_locked:
                         continue  # bedtime: taps don't wake (hold-to-wake only)
@@ -1553,6 +1565,9 @@ class Mello:
                 self._handle_touch_down(event.pos)
             
             elif event.type == pygame.KEYDOWN:
+                if self.alarms.ringing:
+                    self._dismiss_alarm()
+                    continue
                 if self.sleep_manager.is_sleeping:
                     self._user_activated_playback = True
                     self._wake_from_sleep(f'pygame_key:{event.key}')
@@ -2188,6 +2203,25 @@ class Mello:
             return 'sun'
         return None
 
+    def _next_alarm_label(self) -> Optional[str]:
+        """Time beside the sleep clock's bell, or None when nothing is close.
+
+        Only shows an alarm inside the horizon — beyond that it isn't upcoming,
+        it's just configured, and the clock would carry a bell every night.
+        """
+        if not clock_is_trusted():
+            return None
+        when = next_upcoming(self.alarms.alarms, datetime.datetime.now(),
+                             ALARM_BELL_HORIZON_HOURS)
+        return f'{when:%H:%M}' if when else None
+
+    def _alarms_label(self) -> str:
+        """How the Settings row summarises alarms without opening the screen."""
+        armed = sum(1 for a in self.alarms.alarms if a.enabled)
+        if not armed:
+            return 'Off'
+        return f'{armed} on'
+
     def _bedtime_label(self) -> str:
         """Name of the chosen bedtime album for the settings row."""
         uri = self.settings.bedtime_uri
@@ -2215,6 +2249,49 @@ class Mello:
             pygame.display.update(dirty_rects)
         else:
             pygame.display.flip()
+
+    def _check_alarms(self):
+        """Tick the alarms. Called from both the awake loop and the sleep loop.
+
+        The sleep branch continues past _update(), and asleep is exactly when
+        an alarm is most likely to be due — checking in only one place would
+        mean the feature works only when someone is already using the device.
+        """
+        fired = self.alarms.update()
+        if fired is not None:
+            self._on_alarm_fired(fired)
+
+    def _on_alarm_fired(self, alarm):
+        """Hand the device over to the ringing alarm."""
+        logger.info(f'Alarm fired: {alarm.time_label} ({alarm.days_label})')
+
+        # Bedtime must not survive the alarm that was set to end it: waking a
+        # child and then refusing every tap is the worst of both worlds. Same
+        # override as hold-to-wake, so it clears itself when the window ends.
+        # Lifted *before* waking, so _on_wake sees the unlocked state.
+        if self.quiet_hours.active:
+            self.quiet_hours.override()
+
+        self._wake_from_sleep('alarm')
+
+        if self.setup_menu.is_open:
+            self.setup_menu.close()
+
+        self.volume.unmute()
+        if self.now_playing.playing:
+            run_async(self.api.pause)
+
+        self.tracker.on_alarm(alarm.sound, alarm.repeat)
+        self.renderer.invalidate()
+
+    def _dismiss_alarm(self):
+        """Any tap while ringing lands here. Restores the user's own volume."""
+        if not self.alarms.ringing:
+            return
+        self.alarms.dismiss()
+        self.volume.apply()
+        self.sleep_manager.reset_timer()
+        self.renderer.invalidate()
 
     def _check_quiet_hours_hold(self):
         """Wake up if a parent holds the sleeping screen long enough."""
@@ -2550,6 +2627,7 @@ class Mello:
     def _update(self, dt: float):
         """Update application state."""
         self._check_touch_health()
+        self._check_alarms()
         items = self.display_items
         if items:
             self.selected_index = max(0, min(self.selected_index, len(items) - 1))
@@ -3013,6 +3091,14 @@ class Mello:
             sleep_clock_text=sleep_clock_text,
             sleep_clock_drift=sleep_clock_drift,
             sleep_icon=self._sleep_icon(),
+            next_alarm_label=self._next_alarm_label(),
+            alarm_ringing=self.alarms.ringing is not None,
+            alarm_time_label=time.strftime('%H:%M'),
+            alarms=self.alarms.alarms,
+            alarm_edit=self.setup_menu.alarm_edit,
+            alarm_edit_when=self.setup_menu.alarm_edit_when,
+            alarm_delete_pending=self.setup_menu.alarm_delete_pending,
+            alarms_label=self._alarms_label(),
             bedtime_label=self._bedtime_label(),
             bedtime_uri=self.settings.bedtime_uri,
             catalog_items=self.catalog_manager.items,
