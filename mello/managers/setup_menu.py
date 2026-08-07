@@ -64,10 +64,11 @@ class SetupMenu:
         self._reset_confirm_pending: bool = False
         self._reset_confirm_time: float = 0.0
 
-        # Alarm editing. The edited alarm is the live object from the manager's
-        # list, so every tap persists as it happens — there is no Save row, the
-        # same as every other setting on this device.
+        # Alarm editing works on a detached draft: nothing reaches the saved
+        # list until Save. Backing out of a half-built alarm must leave no
+        # trace, and a mis-tap while editing must not change a live alarm.
         self.alarm_edit: Optional[Alarm] = None
+        self.alarm_is_new: bool = False
         self.alarm_delete_pending: bool = False
 
         # Manual update state
@@ -382,9 +383,9 @@ class SetupMenu:
             return
 
         if 'alarm_add' in button_rects and button_rects['alarm_add'].collidepoint(x, y):
-            alarm = new_alarm()
-            self.alarms.add(alarm)
-            self._open_alarm_edit(alarm)
+            # Draft only. An alarm nobody finished building should not appear
+            # in the list, and must never ring.
+            self._open_alarm_edit(new_alarm(), is_new=True)
             return
 
         for key, rect in button_rects.items():
@@ -435,11 +436,23 @@ class SetupMenu:
         elif hit == 'alarm_sound':
             alarm.sound = cycle_sound(alarm.sound)
             self.alarms.preview(alarm.sound)   # hear it, don't guess from the name
+        elif hit == 'alarm_save':
+            # Editing at all is a clear intent to use the alarm again.
+            alarm.enabled = True
+            self.alarms.save_edit(alarm)
+            self._on_toast('Alarm saved')
+            self._close_alarm_edit()
+            self.state = MenuState.ALARM_LIST
+            self.scroll_offset = 0
+            self._on_invalidate()
+            return
         elif hit == 'alarm_delete':
             if self.alarm_delete_pending:
-                self.alarm_delete_pending = False
-                self.alarms.remove(alarm.id)
-                self.alarm_edit = None
+                # A draft was never saved, so there is nothing to remove —
+                # dropping it is the same as backing out.
+                if not self.alarm_is_new:
+                    self.alarms.remove(alarm.id)
+                self._close_alarm_edit()
                 self.state = MenuState.ALARM_LIST
                 self.scroll_offset = 0
                 self._on_toast('Alarm deleted')
@@ -452,13 +465,13 @@ class SetupMenu:
         else:
             return
 
-        # Editing a disabled alarm is a clear intent to use it again.
-        alarm.enabled = True
-        self.alarms.save_edit(alarm)
+        # Everything above edits the draft only. Nothing is written until Save.
         self._on_invalidate()
 
-    def _open_alarm_edit(self, alarm):
-        self.alarm_edit = alarm
+    def _open_alarm_edit(self, alarm, is_new: bool = False):
+        """Open a *copy*, so backing out leaves the stored alarm untouched."""
+        self.alarm_edit = alarm.copy()
+        self.alarm_is_new = is_new
         self.alarm_delete_pending = False
         self.state = MenuState.ALARM_EDIT
         self.scroll_offset = 0
@@ -466,6 +479,7 @@ class SetupMenu:
 
     def _close_alarm_edit(self):
         self.alarm_edit = None
+        self.alarm_is_new = False
         self.alarm_delete_pending = False
 
     @property

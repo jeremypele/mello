@@ -66,6 +66,16 @@ class Alarm:
             return 'Weekend'
         return ' '.join(DAY_NAMES[d] for d in days)
 
+    def copy(self) -> 'Alarm':
+        """A detached copy for the editor to scribble on until Save.
+
+        `days` is copied explicitly — sharing the list would let every chip tap
+        mutate the saved alarm, which is the whole thing a draft prevents.
+        """
+        return Alarm(id=self.id, hour=self.hour, minute=self.minute,
+                     days=list(self.days), repeat=self.repeat,
+                     enabled=self.enabled, sound=self.sound, date=self.date)
+
     def to_dict(self) -> dict:
         return {
             'id': self.id, 'hour': self.hour, 'minute': self.minute,
