@@ -365,6 +365,19 @@ if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
 fi
 
 # ============================================
+# 13. Keep the kernel log across reboots
+# ============================================
+# The touchscreen dies now and then and the only fix is pulling the plug — which
+# took dmesg with it every time, so nobody ever saw what the driver said. Capped
+# at 50M so an SD card can live with it.
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=50M\n' \
+  | sudo tee /etc/systemd/journald.conf.d/mello-persistent.conf > /dev/null
+sudo systemctl restart systemd-journald
+sudo systemctl restart systemd-journal-flush > /dev/null 2>&1 || true
+echo "Kernel log now survives a reboot (journalctl -b -1)"
+
+# ============================================
 # Done!
 # ============================================
 echo ""

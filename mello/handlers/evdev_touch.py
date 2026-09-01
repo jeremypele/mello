@@ -46,6 +46,7 @@ class EvdevTouchHandler:
     # rebind both get their target.
     DRIVER_DIR = '/sys/bus/i2c/drivers/Goodix-TS'
     ID_REGISTER = (0x81, 0x40)          # GT911 product id, reads back b'911\x00'
+    BUFFER_REGISTER = (0x81, 0x4E)      # GT911 coordinate buffer, bit 7 = frame ready
     I2C_SLAVE_FORCE = 0x0706            # ioctl: address a chip the driver owns
     I2C_RDWR = 0x0707                   # ioctl: combined transfer, no bus release
     I2C_M_RD = 0x0001
@@ -125,6 +126,33 @@ class EvdevTouchHandler:
             pass
         return None
 
+    def _read_chip(self, register: Tuple[int, int], length: int) -> bytes:
+        """Read `length` bytes from a GT911 register over I2C.
+
+        One combined transaction (write register, repeated START, read). Writing
+        and reading as two transactions releases the bus in between and misses
+        every fourth read on this panel — measured. Raises OSError when the chip
+        does not answer, ValueError when the driver entry can't be parsed.
+        """
+        entry = self._driver_entry()
+        if entry is None:
+            raise OSError('no Goodix device bound')
+        bus, _, addr = entry.partition('-')
+        chip = int(addr, 16)
+        fd = os.open(f'/dev/i2c-{int(bus)}', os.O_RDWR)
+        try:
+            fcntl.ioctl(fd, self.I2C_SLAVE_FORCE, chip)
+            reg = (ctypes.c_uint8 * 2)(*register)
+            out = (ctypes.c_uint8 * length)()
+            msgs = (_I2cMsg * 2)(
+                _I2cMsg(chip, 0, 2, reg),
+                _I2cMsg(chip, self.I2C_M_RD, length, out),
+            )
+            fcntl.ioctl(fd, self.I2C_RDWR, _I2cRdwr(msgs, 2))
+            return bytes(out)
+        finally:
+            os.close(fd)
+
     def is_controller_alive(self) -> Optional[bool]:
         """Ask the touch chip for its product id. None when it can't be asked.
 
@@ -132,6 +160,8 @@ class EvdevTouchHandler:
         the only way to tell "nobody touched it" from "the controller went deaf",
         which is what leaves a dark screen that ignores every tap until the plug
         is pulled.
+
+        A chip that answers is not the whole story: see has_unread_touch().
 
         ponytail: one 4-byte read a minute while asleep, no i2c-tools, no smbus.
         The kernel locks the bus per transfer, so it can't corrupt a driver read.
@@ -143,23 +173,8 @@ class EvdevTouchHandler:
         if entry is None:
             return False  # driver loaded but the chip fell off the bus
 
-        fd = None
         try:
-            bus, _, addr = entry.partition('-')
-            chip = int(addr, 16)
-            fd = os.open(f'/dev/i2c-{int(bus)}', os.O_RDWR)
-            fcntl.ioctl(fd, self.I2C_SLAVE_FORCE, chip)
-            # One combined transaction (write register, repeated START, read).
-            # Writing and reading as two transactions releases the bus in
-            # between and misses every fourth probe on this panel — measured.
-            reg = (ctypes.c_uint8 * 2)(*self.ID_REGISTER)
-            out = (ctypes.c_uint8 * 4)()
-            msgs = (_I2cMsg * 2)(
-                _I2cMsg(chip, 0, 2, reg),
-                _I2cMsg(chip, self.I2C_M_RD, 4, out),
-            )
-            fcntl.ioctl(fd, self.I2C_RDWR, _I2cRdwr(msgs, 2))
-            return bytes(out).startswith(b'9')
+            return self._read_chip(self.ID_REGISTER, 4).startswith(b'9')
         except ValueError as e:
             # An unparseable entry means the chip can't be asked, which is not
             # the same as the chip being dead — don't let it drive a rebind.
@@ -168,9 +183,21 @@ class EvdevTouchHandler:
         except OSError as e:
             logger.warning(f'Touch controller probe failed: {e}')
             return False
-        finally:
-            if fd is not None:
-                os.close(fd)
+
+    def has_unread_touch(self) -> bool:
+        """True while the chip holds a touch frame nobody has collected.
+
+        This panel has no interrupt line. The kernel polls the chip every 17ms
+        and clears this flag on each read, so a flag that stays set means the
+        polling stopped: the chip still answers every probe and the input node
+        is still open, but taps reach nothing. The product-id probe reads that
+        state as healthy, which is how a dark screen survives a tapping finger.
+        """
+        try:
+            return bool(self._read_chip(self.BUFFER_REGISTER, 1)[0] & 0x80)
+        except (OSError, ValueError) as e:
+            logger.warning(f'Touch buffer read failed: {e}')
+            return False
 
     def recover(self) -> bool:
         """Rebind the touch driver, then re-attach the reader to the new node.

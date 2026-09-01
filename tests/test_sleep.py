@@ -158,6 +158,7 @@ def _touch_probe_stub(alive_sequence):
     """Minimal stand-in for Mello, for the escalation logic only."""
     stub = MagicMock()
     stub._touch_probe_misses = 0
+    stub._last_touch_rebind = 0.0
     stub.evdev_touch.is_controller_alive.side_effect = alive_sequence
     return stub
 
@@ -169,19 +170,18 @@ def test_one_silent_probe_does_not_rebind():
     stub = _touch_probe_stub([False])
     Mello._check_touch_controller(stub)
 
-    stub.evdev_touch.recover.assert_not_called()
+    stub._rebind_touch.assert_not_called()
     assert stub._touch_probe_misses == 1
 
 
 def test_two_silent_probes_rebind_the_driver():
     from mello.app import Mello
 
-    # Third value: the post-rebind probe in the recovery log line
-    stub = _touch_probe_stub([False, False, True])
+    stub = _touch_probe_stub([False, False])
     Mello._check_touch_controller(stub)
     Mello._check_touch_controller(stub)
 
-    stub.evdev_touch.recover.assert_called_once()
+    stub._rebind_touch.assert_called_once()
     assert stub._touch_probe_misses == 0
 
 
@@ -192,7 +192,7 @@ def test_a_live_probe_clears_earlier_misses():
     for _ in range(3):
         Mello._check_touch_controller(stub)
 
-    stub.evdev_touch.recover.assert_not_called()
+    stub._rebind_touch.assert_not_called()
 
 
 def test_a_malformed_driver_entry_cannot_drive_a_rebind(monkeypatch, tmp_path):
@@ -218,13 +218,12 @@ def test_recovery_re_enables_sleep_that_a_failed_rebind_turned_off():
     """Otherwise one failed rebind keeps the screen lit for the rest of the session."""
     from mello.app import Mello
 
-    stub = _touch_probe_stub([False, False, True])
+    stub = _touch_probe_stub([True])
     stub.evdev_touch.recover.return_value = True
     stub.sleep_manager.sleep_enabled = False
     stub.sleep_manager.sleep_disabled_reason = 'touch wake unavailable: rebind failed'
 
-    Mello._check_touch_controller(stub)
-    Mello._check_touch_controller(stub)
+    Mello._rebind_touch(stub)
 
     stub.sleep_manager.enable_sleep.assert_called_once()
 
@@ -233,12 +232,11 @@ def test_recovery_leaves_a_deliberate_sleep_block_alone():
     """Sleep off for another reason (setup menu, dev flag) is not ours to undo."""
     from mello.app import Mello
 
-    stub = _touch_probe_stub([False, False, True])
+    stub = _touch_probe_stub([True])
     stub.evdev_touch.recover.return_value = True
     stub.sleep_manager.sleep_enabled = False
     stub.sleep_manager.sleep_disabled_reason = 'wifi setup in progress'
 
-    Mello._check_touch_controller(stub)
-    Mello._check_touch_controller(stub)
+    Mello._rebind_touch(stub)
 
     stub.sleep_manager.enable_sleep.assert_not_called()
