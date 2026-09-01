@@ -3,6 +3,7 @@ Sleep Manager - Power saving and screen burn-in prevention.
 """
 import os
 import subprocess
+import threading
 import time
 import logging
 from typing import Optional
@@ -39,7 +40,10 @@ class SleepManager:
         self._saved_governor: Optional[str] = None
         self._saved_led_trigger: Optional[str] = None
         self._sleep_started_at: Optional[float] = None
-        self._saved_brightness: Optional[str] = None
+        # enter_sleep/wake_up both touch is_sleeping and the panel, and wake_up
+        # is called from the status-poll thread. Without this they interleave and
+        # leave the device awake with the backlight still at sleep level.
+        self._lock = threading.RLock()
 
         if self.backlight_path:
             logger.info(f'Backlight: {self.backlight_path}')
@@ -174,9 +178,13 @@ class SleepManager:
     
     def enter_sleep(self):
         """Enter deep sleep mode - minimize power consumption."""
+        with self._lock:
+            self._enter_sleep_locked()
+
+    def _enter_sleep_locked(self):
         if self.is_sleeping:
             return
-        
+
         logger.info(f'Entering sleep mode... diag_before={self._display_diag()}')
         self.is_sleeping = True
         self._sleep_started_at = time.time()
@@ -193,9 +201,13 @@ class SleepManager:
     
     def wake_up(self, reason: str = 'activity'):
         """Wake from sleep mode - restore full power."""
+        with self._lock:
+            self._wake_up_locked(reason)
+
+    def _wake_up_locked(self, reason: str):
         if not self.is_sleeping:
             return
-        
+
         slept_for = time.time() - self._sleep_started_at if self._sleep_started_at else None
         slept_text = f'{slept_for:.1f}s' if slept_for is not None else 'unknown'
         logger.info(f'Waking up... reason={reason}, slept_for={slept_text}, diag_before={self._display_diag()}')
@@ -217,7 +229,6 @@ class SleepManager:
 
         target = max(1, int(self.max_brightness * SLEEP_CLOCK_BRIGHTNESS))
         try:
-            self._saved_brightness = self._read_sysfs(self.brightness_path)
             self._set_display(True)  # ensure the panel is powered before dimming
             self._write_sysfs(self.brightness_path, str(target))
             actual = self._read_sysfs(self.brightness_path)
@@ -231,16 +242,20 @@ class SleepManager:
             return False
 
     def _restore_brightness(self):
-        """Restore the pre-sleep brightness level."""
-        if not self.brightness_path or self._saved_brightness is None:
+        """Restore full brightness.
+
+        ponytail: always max, never a remembered level. Sleep is the only thing
+        that dims the panel, so max is the one correct awake value — and reading
+        the level back meant a missed restore got saved as the new "pre-sleep"
+        brightness on the next sleep, dimming the screen permanently.
+        """
+        if not self.brightness_path or self.max_brightness <= 0:
             return
         try:
-            self._write_sysfs(self.brightness_path, self._saved_brightness)
-            logger.info(f'Backlight restored to {self._saved_brightness}')
+            self._write_sysfs(self.brightness_path, str(self.max_brightness))
+            logger.info(f'Backlight restored to {self.max_brightness}')
         except (IOError, OSError, PermissionError) as e:
             logger.warning(f'Brightness restore failed: {e}')
-        finally:
-            self._saved_brightness = None
 
     def _set_display(self, on: bool):
         """Turn display on/off via backlight only.
