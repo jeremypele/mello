@@ -256,6 +256,7 @@ class Mello:
         self._quiet_touch_start: Optional[float] = None  # hold-to-wake timer
         self._touch_probe_misses = 0
         self._last_touch_probe: float = 0.0
+        self._last_touch_rebind: float = 0.0
         self._sleep_clock_minute: Optional[int] = None    # last minute drawn while asleep
         self._bedtime_filtered = False                    # carousel narrowed to bedtime album
         if not touch_available and not self.mock_mode:
@@ -2352,15 +2353,19 @@ class Mello:
             self.sleep_manager.last_activity = 0
 
     def _check_touch_controller_if_due(self):
-        """Probe the touch controller once a minute, asleep or awake.
+        """Probe the touch controller every 15s, asleep or awake.
 
         Called from the top of the main loop, which both branches run. Tying it
         to the sleep heartbeat instead meant one failed rebind — which turns
         sleep off — stopped every later attempt, leaving touch dead for the rest
         of the session.
+
+        15s, not a minute: the unread-touch check below only starts once a
+        finger lands on a dark screen, and nobody keeps tapping for a minute
+        before they pull the plug.
         """
         now = time.time()
-        if now - self._last_touch_probe < 60:
+        if now - self._last_touch_probe < 15:
             return
         self._last_touch_probe = now
         self._check_touch_controller()
@@ -2368,8 +2373,8 @@ class Mello:
     def _check_touch_controller(self):
         """Rebind the touch driver when the controller stops answering.
 
-        Two probes a minute apart, so a single failed I2C transfer doesn't
-        rebind a healthy panel.
+        Two probes apart, so a single failed I2C transfer doesn't rebind a
+        healthy panel.
         """
         alive = self.evdev_touch.is_controller_alive()
         if alive is None:
@@ -2377,11 +2382,12 @@ class Mello:
 
         if alive:
             self._touch_probe_misses = 0
+            self._check_touch_reaches_us()
             return
 
         self._touch_probe_misses += 1
         if self._touch_probe_misses < 2:
-            logger.warning('Touch controller silent (1/2), probing again next minute')
+            logger.warning('Touch controller silent (1/2), probing again shortly')
             return
 
         logger.error(
@@ -2389,6 +2395,50 @@ class Mello:
             'rebinding driver'
         )
         self._touch_probe_misses = 0
+        self._rebind_touch()
+
+    def _check_touch_reaches_us(self):
+        """Rebind when the chip holds a touch the kernel never collected.
+
+        This panel has no interrupt line — the kernel polls the chip and clears
+        its buffer flag on every read. A flag still set a quarter-second later,
+        with no wake event to show for it, means the polling stopped: the chip
+        answers every probe and the input node is still open, so the id probe
+        calls it healthy while every tap on the dark screen goes nowhere.
+
+        Only while asleep. Awake, a finger held down keeps the flag legitimately
+        busy and the wake event is stale, so the two can't be told apart.
+        ponytail: touch dying awake leaves a visible screen — a worse day, not a
+        dead device. Widen this if that turns out to bite too.
+        """
+        if not self.sleep_manager.is_sleeping:
+            return
+        if not self.evdev_touch.has_unread_touch():
+            return
+
+        # A touch the kernel does collect raises wake_event within one poll
+        # (17ms), and the main loop is about to act on it.
+        time.sleep(0.25)
+        if self.evdev_touch.wake_event.is_set():
+            return
+        if not self.evdev_touch.has_unread_touch():
+            return
+
+        logger.error('Touch frame left unread while asleep, rebinding driver')
+        if self._rebind_touch() and not self.bedtime_locked:
+            # Somebody is tapping a dark screen right now. Don't make them
+            # guess whether it worked.
+            self._wake_from_sleep('touch_unread')
+
+    def _rebind_touch(self) -> bool:
+        """Unbind and rebind the touch driver. True when touch came back."""
+        now = time.time()
+        if now - self._last_touch_rebind < 60:
+            # A chip that stays wedged must not put the driver in a rebind loop.
+            logger.warning('Touch rebind skipped: one just ran')
+            return False
+        self._last_touch_rebind = now
+
         recovered = self.evdev_touch.recover()
         logger.info(
             f'Touch rebind: recovered={recovered} | '
@@ -2398,13 +2448,14 @@ class Mello:
         )
         if not recovered:
             self._disable_sleep_for_touch('rebind failed')
-            return
+            return False
 
         disabled_for_touch = (
             self.sleep_manager.sleep_disabled_reason or ''
         ).startswith('touch wake unavailable')
         if not self.sleep_manager.sleep_enabled and disabled_for_touch:
             self.sleep_manager.enable_sleep()
+        return True
 
     def _log_sleep_wait_if_due(self):
         """Log periodic sleeping heartbeat so black-screen reports have context."""
