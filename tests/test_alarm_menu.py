@@ -1,4 +1,5 @@
 """Alarm menu taps: what each control does to the alarm underneath it."""
+import datetime
 from pathlib import Path
 import sys
 
@@ -9,6 +10,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from mello.managers.alarms import AlarmManager
 from mello.managers.setup_menu import SetupMenu
 from mello.models import Alarm, MenuState
+
+
+# 2026-08-03 is a Monday, so weekday() lines up with the day index in `days`.
+# Pinned so the manager's startup expiry judges the fixtures against this date
+# rather than whatever today happens to be.
+MONDAY = datetime.datetime(2026, 8, 3, 6, 0)
 
 
 class Rect:
@@ -48,7 +55,7 @@ class FakePlayer:
 
 def _menu(alarms=None):
     player = FakePlayer()
-    manager = AlarmManager(FakeSettings(alarms or []), player=player)
+    manager = AlarmManager(FakeSettings(alarms or []), player=player, now=MONDAY)
     menu = SetupMenu(
         catalog_manager=None, settings=manager.settings,
         on_toast=lambda msg: None, on_invalidate=lambda: None,
