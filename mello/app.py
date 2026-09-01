@@ -255,6 +255,7 @@ class Mello:
         self.quiet_hours = QuietHours(self.settings)
         self._quiet_touch_start: Optional[float] = None  # hold-to-wake timer
         self._touch_probe_misses = 0
+        self._last_touch_probe: float = 0.0
         self._sleep_clock_minute: Optional[int] = None    # last minute drawn while asleep
         self._bedtime_filtered = False                    # carousel narrowed to bedtime album
         if not touch_available and not self.mock_mode:
@@ -950,6 +951,7 @@ class Mello:
         reason = self.evdev_touch.consume_failure_reason()
         if reason:
             self._disable_sleep_for_touch(reason)
+        self._check_touch_controller_if_due()
     
     def _on_ws_update(self):
         """Called when WebSocket receives an event."""
@@ -1113,7 +1115,7 @@ class Mello:
                     elif event.type == pygame.QUIT:
                         self.running = False
                         break
-                self._sleep_heartbeat_if_due()
+                self._log_sleep_wait_if_due()
                 continue
             
             self._handle_events()
@@ -2349,11 +2351,25 @@ class Mello:
             # bluetooth/analytics bookkeeping — takes the screen down.
             self.sleep_manager.last_activity = 0
 
+    def _check_touch_controller_if_due(self):
+        """Probe the touch controller once a minute, asleep or awake.
+
+        Called from the top of the main loop, which both branches run. Tying it
+        to the sleep heartbeat instead meant one failed rebind — which turns
+        sleep off — stopped every later attempt, leaving touch dead for the rest
+        of the session.
+        """
+        now = time.time()
+        if now - self._last_touch_probe < 60:
+            return
+        self._last_touch_probe = now
+        self._check_touch_controller()
+
     def _check_touch_controller(self):
         """Rebind the touch driver when the controller stops answering.
 
-        Two misses in a row, so a single colliding I2C transfer doesn't rebind a
-        healthy panel.
+        Two probes a minute apart, so a single failed I2C transfer doesn't
+        rebind a healthy panel.
         """
         alive = self.evdev_touch.is_controller_alive()
         if alive is None:
@@ -2382,19 +2398,20 @@ class Mello:
         )
         if not recovered:
             self._disable_sleep_for_touch('rebind failed')
+            return
 
-    def _sleep_heartbeat_if_due(self):
-        """Once a minute while asleep: log context, and check touch still works.
+        disabled_for_touch = (
+            self.sleep_manager.sleep_disabled_reason or ''
+        ).startswith('touch wake unavailable')
+        if not self.sleep_manager.sleep_enabled and disabled_for_touch:
+            self.sleep_manager.enable_sleep()
 
-        `touch_available` only says the reader thread started. It stayed True
-        through a real episode where the controller answered nothing for nine
-        minutes and the device looked dead — hence the probe.
-        """
+    def _log_sleep_wait_if_due(self):
+        """Log periodic sleeping heartbeat so black-screen reports have context."""
         now = time.time()
         if now - self._last_sleep_wait_log < 60:
             return
         self._last_sleep_wait_log = now
-        self._check_touch_controller()
         logger.info(
             f'Sleep wait | touch_available={self.evdev_touch.is_available} | '
             f'touch_device={self.evdev_touch.device_name or "none"} | '
@@ -2912,13 +2929,15 @@ class Mello:
 
         self.sleep_manager.check_sleep(self.now_playing.playing or menu_open)
         if was_awake and self.sleep_manager.is_sleeping:
+            # First, before any bookkeeping that can block: the last tap of the
+            # awake session leaves this set, which woke the screen 0.3s after
+            # every sleep and kept it lit for 2 more minutes. A tap arriving
+            # after this point is a real wake and must survive.
+            self.evdev_touch.wake_event.clear()
             self.bluetooth.pause_monitoring()
             idle = time.time() - self.sleep_manager.last_activity
             self.tracker.on_sleep(idle)
             self._sleep_clock_minute = None  # force an immediate clock draw
-            # The last tap of the awake session leaves this set, which woke the
-            # screen 0.3s after every sleep and kept it lit for 2 more minutes.
-            self.evdev_touch.wake_event.clear()
         
         self.playback.update_loading_state(
             self.now_playing, self.carousel.settled, self._pending_focus_uri is not None

@@ -143,10 +143,10 @@ class EvdevTouchHandler:
         if entry is None:
             return False  # driver loaded but the chip fell off the bus
 
-        bus, _, addr = entry.partition('-')
-        chip = int(addr, 16)
         fd = None
         try:
+            bus, _, addr = entry.partition('-')
+            chip = int(addr, 16)
             fd = os.open(f'/dev/i2c-{int(bus)}', os.O_RDWR)
             fcntl.ioctl(fd, self.I2C_SLAVE_FORCE, chip)
             # One combined transaction (write register, repeated START, read).
@@ -160,6 +160,11 @@ class EvdevTouchHandler:
             )
             fcntl.ioctl(fd, self.I2C_RDWR, _I2cRdwr(msgs, 2))
             return bytes(out).startswith(b'9')
+        except ValueError as e:
+            # An unparseable entry means the chip can't be asked, which is not
+            # the same as the chip being dead — don't let it drive a rebind.
+            logger.warning(f'Touch controller probe skipped: entry={entry!r} ({e})')
+            return None
         except OSError as e:
             logger.warning(f'Touch controller probe failed: {e}')
             return False
@@ -206,6 +211,10 @@ class EvdevTouchHandler:
             except Exception as e:
                 logger.debug(f'Error closing touch device: {e}')
         self._device = None
+        with self._touch_lock:
+            # A rebind while a finger is down never sees the release. Left True,
+            # this reads as a hold that never ends, which overrides bedtime.
+            self._touching = False
         with self._failure_lock:
             self._failure_reason = None
         return self.start()

@@ -193,3 +193,52 @@ def test_a_live_probe_clears_earlier_misses():
         Mello._check_touch_controller(stub)
 
     stub.evdev_touch.recover.assert_not_called()
+
+
+def test_a_malformed_driver_entry_cannot_drive_a_rebind(monkeypatch, tmp_path):
+    """Unparseable entry means "can't ask", not "chip is dead"."""
+    handler = EvdevTouchHandler(720, 1280)
+    monkeypatch.setattr(EvdevTouchHandler, 'DRIVER_DIR', str(tmp_path))
+    (tmp_path / 'not-a-chip').mkdir()
+
+    assert handler.is_controller_alive() is None
+
+
+def test_restart_forgets_a_finger_that_was_down(monkeypatch):
+    """A rebind mid-touch never sees the release, and a stuck hold overrides bedtime."""
+    handler = EvdevTouchHandler(720, 1280)
+    handler._touching = True
+    monkeypatch.setattr(EvdevTouchHandler, 'start', lambda self: True)
+
+    assert handler.restart() is True
+    assert handler.is_touching is False
+
+
+def test_recovery_re_enables_sleep_that_a_failed_rebind_turned_off():
+    """Otherwise one failed rebind keeps the screen lit for the rest of the session."""
+    from mello.app import Mello
+
+    stub = _touch_probe_stub([False, False, True])
+    stub.evdev_touch.recover.return_value = True
+    stub.sleep_manager.sleep_enabled = False
+    stub.sleep_manager.sleep_disabled_reason = 'touch wake unavailable: rebind failed'
+
+    Mello._check_touch_controller(stub)
+    Mello._check_touch_controller(stub)
+
+    stub.sleep_manager.enable_sleep.assert_called_once()
+
+
+def test_recovery_leaves_a_deliberate_sleep_block_alone():
+    """Sleep off for another reason (setup menu, dev flag) is not ours to undo."""
+    from mello.app import Mello
+
+    stub = _touch_probe_stub([False, False, True])
+    stub.evdev_touch.recover.return_value = True
+    stub.sleep_manager.sleep_enabled = False
+    stub.sleep_manager.sleep_disabled_reason = 'wifi setup in progress'
+
+    Mello._check_touch_controller(stub)
+    Mello._check_touch_controller(stub)
+
+    stub.sleep_manager.enable_sleep.assert_not_called()
