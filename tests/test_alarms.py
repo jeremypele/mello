@@ -177,7 +177,8 @@ def test_missed_alarm_is_not_fired_late():
 def test_one_shot_disarms_itself_after_ringing():
     alarm = once()
     settings = FakeSettings([alarm])
-    mgr = AlarmManager(settings, player=FakePlayer(), monotonic=lambda: 0.0)
+    mgr = AlarmManager(settings, player=FakePlayer(), monotonic=lambda: 0.0,
+                       now=at(0, 6))
 
     assert mgr.update(at(5, 9)) is alarm
     assert alarm.enabled is False
@@ -212,14 +213,14 @@ def test_expire_stale_leaves_future_and_recurring_alarms_alone():
 def test_manager_expires_stale_one_shots_at_startup():
     alarm = once(date='2026-08-01')
     settings = FakeSettings([alarm])
-    AlarmManager(settings, player=FakePlayer())
+    AlarmManager(settings, player=FakePlayer(), now=at(0, 6))
     assert alarm.enabled is False
     assert settings.saves == 1
 
 
 def test_rearming_a_stale_one_shot_moves_it_forward():
     alarm = once(date='2026-08-01', enabled=False)
-    mgr = AlarmManager(FakeSettings([alarm]), player=FakePlayer())
+    mgr = AlarmManager(FakeSettings([alarm]), player=FakePlayer(), now=at(0, 6))
     mgr.toggle(alarm.id, now=at(0, 6))
     assert alarm.enabled is True
     assert alarm.date == '2026-08-08'     # next Saturday, not the dead date
@@ -358,7 +359,7 @@ def test_save_edit_updates_in_place_rather_than_duplicating():
 
 def test_remove_drops_only_the_named_alarm():
     keep, drop = weekly(), once()
-    mgr = AlarmManager(FakeSettings([keep, drop]), player=FakePlayer())
+    mgr = AlarmManager(FakeSettings([keep, drop]), player=FakePlayer(), now=at(0, 6))
     mgr.remove(drop.id)
     assert mgr.alarms == [keep]
 

@@ -179,7 +179,8 @@ class AlarmManager:
     """
 
     def __init__(self, settings, player=None, on_volume: Optional[Callable[[int], None]] = None,
-                 monotonic: Callable[[], float] = time.monotonic):
+                 monotonic: Callable[[], float] = time.monotonic,
+                 now: Optional[datetime.datetime] = None):
         self.settings = settings
         self._player = player if player is not None else SoundPlayer()
         self._on_volume = on_volume
@@ -193,7 +194,7 @@ class AlarmManager:
         # 60fps doesn't restart the same alarm sixty times a second.
         self._last_fired: Optional[str] = None
 
-        if expire_stale(self.settings.alarms, datetime.datetime.now()):
+        if expire_stale(self.settings.alarms, now or datetime.datetime.now()):
             self.settings.save_alarms()
 
     @property
