@@ -758,6 +758,35 @@ _migrate_014() {
 }
 
 # ============================================
+# Migration 015: go-librespot 0.9.0 (reconnects after a WiFi outage)
+# ============================================
+# 0.8.0 gave up on its Spotify access-point session after a long WiFi drop
+# and never retried. Every play then failed with "accesspoint closed" until
+# the plug was pulled. 0.9.0 bounds the retry loops and discards the dead
+# session, so a fresh one is opened on the next request.
+_migrate_015() {
+  local VERSION="v0.9.0"
+  local ARCH
+  ARCH=$(dpkg --print-architecture)
+  local URL="https://github.com/devgianlu/go-librespot/releases/download/$VERSION/go-librespot_linux_${ARCH}.tar.gz"
+  local TMP
+  TMP=$(mktemp -d)
+
+  if ! curl -fsSL "$URL" -o "$TMP/go-librespot.tar.gz" \
+     || ! tar -xzf "$TMP/go-librespot.tar.gz" -C "$TMP" go-librespot; then
+    log "Could not fetch go-librespot $VERSION for $ARCH, will retry next update"
+    rm -rf "$TMP"
+    return 1
+  fi
+
+  # ponytail: .prev is the only rollback; a second bad release needs a real pin
+  [ -f /usr/local/bin/go-librespot ] && sudo cp -p /usr/local/bin/go-librespot /usr/local/bin/go-librespot.prev
+  sudo install -m 755 "$TMP/go-librespot" /usr/local/bin/go-librespot
+  rm -rf "$TMP"
+  log "go-librespot $VERSION installed (auto-update restarts the service)"
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -774,3 +803,4 @@ run_migration "011" "Converge Raspberry Pi Touch Display 2 boot config"
 run_migration "012" "Reboot after display boot config changes"
 run_migration "013" "Disable Spotify suggested autoplay"
 run_migration "014" "Keep librespot independent of UI sleep/restarts"
+run_migration "015" "go-librespot 0.9.0 (reconnects after a WiFi outage)"
