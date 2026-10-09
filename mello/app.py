@@ -2164,8 +2164,11 @@ class Mello:
                 logger.error(f'  Wake refresh failed: {e}')
                 logger.info('WAKE UP FAILED')
                 logger.info('=' * 40)
-        
+
         run_async(wake_refresh)
+        # The poller may be parked in its 30s sleep-mode wait; without this it
+        # keeps the status stale for up to 30s after the screen comes on.
+        self._poll_wake_event.set()
 
     def _wake_from_sleep(self, reason: str):
         """Wake from sleep and emit one high-signal diagnostic line."""
