@@ -23,6 +23,12 @@ one is deprecated and answers 403 for everyone. /items serves only playlists the
 account owns or collaborates on, so someone else's playlist has no list even
 when it's public and even when logged in.
 
+When the Web API refuses a playlist (Spotify's own, or someone else's), two
+public, no-login sources fill in. The oEmbed endpoint gives the name and cover.
+The embed page that websites use ships the full track list in its page data.
+That page data is not a documented API: if Spotify changes it, the list is
+simply unavailable again.
+
 Requests go straight to api.spotify.com rather than through the daemon's
 /web-api proxy, because that proxy discards Spotify's Retry-After header.
 
@@ -43,6 +49,8 @@ import requests
 logger = logging.getLogger(__name__)
 
 API_BASE = 'https://api.spotify.com/v1'
+OEMBED_URL = 'https://open.spotify.com/oembed'
+EMBED_PLAYLIST_URL = 'https://open.spotify.com/embed/playlist/{}'
 ACCOUNTS_TOKEN_URL = 'https://accounts.spotify.com/api/token'
 
 # Spotify caps page size at 50 on every endpoint we use.
@@ -249,6 +257,12 @@ class TrackListStore:
         logger.info(f'Track list: fetching {context_uri[:45]}')
         try:
             tracks = self._fetch_all_pages(*parsed)
+            if tracks is None and parsed[0] == 'playlist' and self.is_unavailable(context_uri):
+                tracks = self._fetch_from_embed(parsed[1])
+                if tracks is not None:
+                    with self._lock:
+                        self._unavailable.discard(context_uri)
+                    logger.info('Track list: read from the public embed page instead')
             if tracks is None:
                 with self._lock:
                     self._failed.add(context_uri)
@@ -336,7 +350,8 @@ class TrackListStore:
         unlike /playlists/{id}/tracks (gated behind playlist-read-private, a
         scope a client-credentials token can never carry), basic metadata like
         name and cover art needs no scope at all, so it works for any playlist,
-        even ones whose track list this device can never read.
+        even ones whose track list this device can never read. The exception is
+        Spotify's own playlists, which 404; oEmbed covers those.
         """
         parsed = parse_context(context_uri)
         if not parsed or parsed[0] != 'playlist' or self.mock_mode:
@@ -352,27 +367,9 @@ class TrackListStore:
             self._playlist_info_in_flight.add(context_uri)
 
         try:
-            token = self._access_token()
-            if not token:
+            info = self._web_api_playlist_info(context_uri, spotify_id) or self._oembed_info(spotify_id)
+            if not info:
                 return None
-            resp = requests.get(
-                f'{API_BASE}/playlists/{spotify_id}',
-                headers={'Authorization': f'Bearer {token}'},
-                params={'fields': 'name,images'},
-                timeout=6,
-            )
-            if resp.status_code != 200:
-                logger.info(f'Playlist info lookup returned {resp.status_code} for {context_uri[:45]}')
-                return None
-            try:
-                data = resp.json() or {}
-            except ValueError:
-                return None
-            images = data.get('images') or []
-            image_url = images[0].get('url') if images and isinstance(images[0], dict) else None
-            if not image_url:
-                return None
-            info = {'name': data.get('name') or 'Playlist', 'image': image_url}
             with self._lock:
                 self._playlist_info[context_uri] = info
             return info
@@ -382,6 +379,69 @@ class TrackListStore:
         finally:
             with self._lock:
                 self._playlist_info_in_flight.discard(context_uri)
+
+    def _web_api_playlist_info(self, context_uri: str, spotify_id: str) -> Optional[dict]:
+        token = self._access_token()
+        if not token:
+            return None
+        resp = requests.get(
+            f'{API_BASE}/playlists/{spotify_id}',
+            headers={'Authorization': f'Bearer {token}'},
+            params={'fields': 'name,images'},
+            timeout=6,
+        )
+        if resp.status_code != 200:
+            logger.info(f'Playlist info lookup returned {resp.status_code} for {context_uri[:45]}')
+            return None
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            return None
+        images = data.get('images') or []
+        image_url = images[0].get('url') if images and isinstance(images[0], dict) else None
+        if not image_url:
+            return None
+        return {'name': data.get('name') or 'Playlist', 'image': image_url}
+
+    def _oembed_info(self, spotify_id: str) -> Optional[dict]:
+        """Name and cover from Spotify's public oEmbed endpoint. No login, and
+        it answers for Spotify's own playlists, which the Web API 404s."""
+        resp = requests.get(
+            OEMBED_URL,
+            params={'url': f'https://open.spotify.com/playlist/{spotify_id}'},
+            timeout=6,
+        )
+        if resp.status_code != 200:
+            logger.info(f'Playlist oEmbed lookup returned {resp.status_code} for {spotify_id}')
+            return None
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            return None
+        if not data.get('thumbnail_url'):
+            return None
+        return {'name': data.get('title') or 'Playlist', 'image': data['thumbnail_url']}
+
+    def _fetch_from_embed(self, spotify_id: str) -> Optional[List[Track]]:
+        """Track list from the playlist's public embed page, or None.
+
+        Only for playlists the Web API refuses. The list is in the page's
+        __NEXT_DATA__ JSON, which is not a documented API.
+        """
+        try:
+            resp = requests.get(EMBED_PLAYLIST_URL.format(spotify_id),
+                                headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            resp.raise_for_status()
+            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                              resp.text, re.S)
+            data = json.loads(match.group(1))
+            raw = data['props']['pageProps']['state']['data']['entity']['trackList']
+        except (requests.RequestException, AttributeError, KeyError, TypeError, ValueError) as e:
+            logger.info(f'Track list: embed page unreadable for {spotify_id}: {e!r}')
+            return None
+        tracks = [Track(uri=t['uri'], name=t.get('title') or 'Unknown', artist=t.get('subtitle') or '')
+                  for t in raw if isinstance(t, dict) and t.get('uri')]
+        return tracks[:MAX_TRACKS] or None
 
     def cooldown_remaining(self) -> float:
         """Seconds until fetching can generally resume. 0 when clear.
@@ -641,7 +701,7 @@ class TrackListStore:
             f'Track list unavailable: Spotify returned {status_code} for '
             f'{context_uri[:45]} even from the account\'s own session — either '
             f'a playlist this account neither owns nor collaborates on, or one '
-            f'of Spotify\'s own editorial ones. Both are closed to every app.'
+            f'of Spotify\'s own editorial ones. The Web API closes both to every app.'
         )
 
     def _get_json(self, url: str, headers: dict, params: Optional[dict], quota: str) -> Optional[dict]:

@@ -823,6 +823,17 @@ class TestPlaylistInfo:
             assert store.playlist_info(PLAYLIST) is None
         get.assert_not_called()
 
+    def test_falls_back_to_oembed_when_the_web_api_refuses(self, store):
+        """Spotify's own playlists 404 on the Web API (device, 2026-10-09)."""
+        def get(url, **kwargs):
+            if url.startswith(API_BASE):
+                return _resp(404)
+            return _resp(200, {'title': 'This Is Theodora', 'thumbnail_url': 'https://pickasso/x'})
+        with patch('mello.api.tracklist.requests.post', return_value=_resp(200, {'token': 'a' * 50})), \
+             patch('mello.api.tracklist.requests.get', side_effect=get):
+            info = store.playlist_info(PLAYLIST)
+        assert info == {'name': 'This Is Theodora', 'image': 'https://pickasso/x'}
+
 
 class TestPlaylistEndpoint:
     """Spotify deprecated /playlists/{id}/tracks on 11 Feb 2026; it now 403s.
@@ -969,7 +980,29 @@ class TestLoggedIn:
             assert logged_in.fetch(PLAYLIST) is None
 
         assert logged_in.is_unavailable(PLAYLIST) is True
-        assert get.call_count == 1, 'no point retrying a weaker credential'
+        api_calls = [c for c in get.call_args_list if c.args[0].startswith('https://api.spotify.com')]
+        assert len(api_calls) == 1, 'no point retrying a weaker credential'
+
+    def test_a_refused_playlist_is_read_from_the_embed_page(self, logged_in):
+        """Someone else's playlist 403s even when logged in; the embed page
+        that websites use still lists its tracks."""
+        data = {'props': {'pageProps': {'state': {'data': {'entity': {'trackList': [
+            {'uri': 'spotify:track:a', 'title': 'AGUA', 'subtitle': 'Maluma, Shakira'},
+            {'uri': None, 'title': 'a removed track'},
+        ]}}}}}}
+        page = MagicMock(status_code=200)
+        page.text = f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(data)}</script>'
+
+        def get(url, **kwargs):
+            return _resp(403) if url.startswith(API_BASE) else page
+
+        post, _ = _accounts_post()
+        with patch('mello.api.tracklist.requests.post', side_effect=post), \
+             patch('mello.api.tracklist.requests.get', side_effect=get):
+            tracks = logged_in.fetch(PLAYLIST)
+
+        assert tracks == [Track(uri='spotify:track:a', name='AGUA', artist='Maluma, Shakira')]
+        assert logged_in.is_unavailable(PLAYLIST) is False
 
     def test_a_rotated_refresh_token_is_honoured(self, logged_in):
         post, _ = _accounts_post(refresh_payload={

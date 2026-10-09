@@ -32,10 +32,10 @@ def _app(context_uri, track_album='Some Album', track_cover='https://x/cover.jpg
         track_album=track_album, track_artist='Artist', track_cover=track_cover)
     app.temp_item = None
     app._temp_item_lock = threading.Lock()
+    app._temp_real_cover_uri = None
     app.catalog_manager = SimpleNamespace(
         items=[],
-        get_collected_covers=lambda uri: None,
-        download_temp_image=lambda url: f'/images/temp_{hash(url) & 0xff:x}.png',
+        download_temp_image=lambda url: f'/images/temp_{url.rsplit("/", 1)[-1]}.png',
     )
     app.track_lists = SimpleNamespace(
         known_show_for=lambda uri: None,
@@ -141,6 +141,30 @@ class TestFetchPlaylistInfoAsync:
         app.track_lists.playlist_info = boom
 
         app._fetch_playlist_info_async(PLAYLIST)   # must not raise
+
+
+class TestRealCoverIsKept:
+    """Device, 2026-10-09: 'Shakira Hits' resolved, then the first track's
+    cover and name came back and were saved instead."""
+
+    def _resolved(self):
+        app = _app(PLAYLIST, track_album='AGUA')
+        with patch('mello.app.run_async'):
+            app._update_temp_item()
+        app.track_lists.playlist_info = lambda uri: {'name': 'Shakira Hits', 'image': 'https://p/real'}
+        app._fetch_playlist_info_async(PLAYLIST)
+        return app
+
+    def test_a_late_track_cover_does_not_replace_the_playlist_cover(self):
+        app = self._resolved()
+        app._download_temp_cover_async(PLAYLIST, 'https://x/cover.jpg')
+        assert app.temp_item.image == '/images/temp_real.png'
+
+    def test_the_next_update_keeps_the_playlist_name(self):
+        app = self._resolved()
+        with patch('mello.app.run_async'):
+            app._update_temp_item()
+        assert app.temp_item.name == 'Shakira Hits'
 
 
 if __name__ == '__main__':

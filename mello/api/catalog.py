@@ -63,20 +63,12 @@ class CatalogManager:
         # Thread locks for file operations
         self._catalog_lock = threading.Lock()
         self._progress_lock = threading.Lock()
-        self._playlist_covers_lock = threading.Lock()
         
         # Ensure images directory exists
         self.images_path.mkdir(parents=True, exist_ok=True)
         
         # Hash -> local_path for deduplication
         self.image_hashes: Dict[str, str] = {}
-        
-        # Playlist covers collection: {context_uri: {hash: local_path}}
-        self.playlist_covers: Dict[str, Dict[str, str]] = {}
-        
-        # Track tried URLs to avoid repeated downloads (with max size to prevent memory growth)
-        self._tried_cover_urls: set = set()
-        self._max_tried_urls = 500
         
         # Cached items
         self._items: List[CatalogItem] = []
@@ -374,189 +366,6 @@ class CatalogManager:
             return None
     
     # ============================================
-    # PLAYLIST COVER COLLECTION
-    # ============================================
-    
-    def collect_cover_for_playlist(self, context_uri: str, cover_url: str) -> bool:
-        """Collect album cover URL for playlist composite (max 4 unique).
-
-        Stores URLs for later composite creation. Returns True if a new URL was added.
-        """
-        if 'playlist' not in context_uri or not cover_url:
-            return False
-
-        with self._playlist_covers_lock:
-            if context_uri not in self.playlist_covers:
-                self.playlist_covers[context_uri] = {}
-
-            covers = self.playlist_covers[context_uri]
-            if len(covers) >= 4:
-                return False  # Already have 4 covers
-
-        # Skip if we've already tried this URL recently
-        url_key = f'{context_uri}:{cover_url}'
-        if url_key in self._tried_cover_urls:
-            return False
-
-        # Cleanup if cache is too large (prevent memory growth)
-        if len(self._tried_cover_urls) > self._max_tried_urls:
-            logger.debug(f'Clearing tried URLs cache ({len(self._tried_cover_urls)} entries)')
-            self._tried_cover_urls.clear()
-
-        self._tried_cover_urls.add(url_key)
-
-        try:
-            # Download to get hash for deduplication (outside lock — network I/O)
-            response = requests.get(cover_url, timeout=10)
-            response.raise_for_status()
-            buffer = response.content
-            hash_full = hashlib.md5(buffer).hexdigest()
-            hash_short = hash_full[:8]
-
-            with self._playlist_covers_lock:
-                # Re-check under lock
-                covers = self.playlist_covers.get(context_uri, {})
-
-                # Skip if already have this hash for this context
-                if hash_short in covers:
-                    logger.debug(f'Cover already collected (same album): {len(covers)}/4')
-                    return False
-
-                # Store URL and buffer for later composite creation
-                covers[hash_short] = {'url': cover_url, 'buffer': buffer}
-                logger.info(f'Collected cover {len(covers)}/4 for playlist')
-
-            # Create composite if we have enough covers (outside lock)
-            if len(covers) >= 4:
-                self._update_playlist_covers_if_needed(context_uri)
-            
-            return True
-            
-        except requests.RequestException as e:
-            logger.debug(f'Error downloading cover image: {e}')
-            return False
-        except Exception as e:
-            logger.warning(f'Error collecting cover: {e}', exc_info=True)
-            return False
-    
-    def _create_composite_from_collected(self, context_uri: str) -> Optional[str]:
-        """Create composite image from collected covers and save all variants to disk.
-        
-        Generates 4 variants like regular images for fast runtime loading.
-        """
-        with self._playlist_covers_lock:
-            if context_uri not in self.playlist_covers:
-                return None
-            covers = self.playlist_covers[context_uri]
-            if not covers:
-                return None
-            # Snapshot buffers under lock
-            cover_buffers = [c['buffer'] for c in covers.values()]
-
-        try:
-            
-            # Pad to 4 by repeating
-            while len(cover_buffers) < 4 and cover_buffers:
-                cover_buffers.append(cover_buffers[len(cover_buffers) % len(covers)])
-            
-            # Generate hash from all buffers combined
-            combined = b''.join(cover_buffers)
-            hash_short = hashlib.md5(combined).hexdigest()[:8]
-            
-            # Check if already exists
-            if hash_short in self.image_hashes:
-                return self.image_hashes[hash_short]
-            
-            base_name = f'{hash_short}_composite'
-            
-            # Generate all 4 variants
-            sizes = [
-                (COVER_SIZE, ''),            # 410px
-                (COVER_SIZE_SMALL, '_small') # 307px
-            ]
-            
-            for size, suffix in sizes:
-                half_size = size // 2
-                composite = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-                positions = [(0, 0), (half_size, 0), (0, half_size), (half_size, half_size)]
-                
-                for i, (buffer, pos) in enumerate(zip(cover_buffers, positions)):
-                    try:
-                        img = Image.open(BytesIO(buffer)).convert('RGBA')
-                        img = img.resize((half_size, half_size), Image.Resampling.LANCZOS)
-                        composite.paste(img, pos)
-                    except Exception as e:
-                        logger.debug(f'Error processing cover {i}: {e}')
-                        draw = ImageDraw.Draw(composite)
-                        draw.rectangle([pos, (pos[0] + half_size, pos[1] + half_size)], fill=(40, 40, 40))
-                
-                # Apply rounded corners
-                radius = max(12, size // 25)
-                composite = apply_rounded_corners_pil(composite, radius)
-                
-                # Rotate 90° CW for portrait display mode (like regular covers)
-                composite = composite.transpose(Image.Transpose.ROTATE_270)
-                
-                # Save normal version
-                filename = f'{base_name}{suffix}.png'
-                composite.save(self.images_path / filename, 'PNG')
-                
-                # Save dimmed version
-                dimmed = apply_dimming(composite)
-                dimmed.save(self.images_path / f'{base_name}{suffix}_dim.png', 'PNG')
-            
-            local_path = f'/images/{base_name}.png'
-            self.image_hashes[hash_short] = local_path
-            logger.info(f'Created composite image variants: {local_path} (4 files)')
-            return local_path
-            
-        except Exception as e:
-            logger.warning(f'Error creating composite: {e}', exc_info=True)
-            return None
-    
-    def _update_playlist_covers_if_needed(self, context_uri: str):
-        """Update saved playlist with composite when we have enough covers.
-        
-        Will update existing composites if new unique covers are collected.
-        """
-        with self._playlist_covers_lock:
-            covers = self.playlist_covers.get(context_uri, {})
-        if len(covers) < 4:
-            return  # Wait until we have 4 covers
-        
-        try:
-            catalog = self._load_raw()
-            item = next((i for i in catalog['items'] if i['uri'] == context_uri), None)
-            
-            if not item or item.get('type') != 'playlist':
-                return
-            
-            # Create composite (returns existing path if same covers)
-            composite_path = self._create_composite_from_collected(context_uri)
-            if composite_path:
-                current_image = item.get('image', '')
-                # Only update if composite changed
-                if composite_path != current_image:
-                    item['image'] = composite_path
-                    # Remove old images array if present
-                    if 'images' in item:
-                        del item['images']
-                    self._save_raw(catalog)
-                    logger.info(f'Updated playlist with new composite image')
-                
-        except (json.JSONDecodeError, IOError, OSError) as e:
-            logger.warning(f'Error updating playlist covers: {e}', exc_info=True)
-        except Exception as e:
-            logger.warning(f'Unexpected error updating playlist covers: {e}', exc_info=True)
-    
-    def get_collected_covers(self, context_uri: str) -> Optional[List[str]]:
-        """Get collected cover image paths for a playlist."""
-        with self._playlist_covers_lock:
-            if context_uri in self.playlist_covers:
-                return list(self.playlist_covers[context_uri].values())
-            return None
-    
-    # ============================================
     # SAVE & DELETE
     # ============================================
     
@@ -601,16 +410,7 @@ class CatalogManager:
                     # Already permanent image, reuse it
                     local_image = image_url
             
-            # For playlists: create composite from collected covers
-            if not local_image and item_data.get('type') == 'playlist':
-                with self._playlist_covers_lock:
-                    covers = self.playlist_covers.get(uri, {})
-                if covers:
-                    local_image = self._create_composite_from_collected(uri)
-                    if local_image:
-                        logger.info(f'Created composite from {len(covers)} collected covers')
-            
-            # Download single image if no composite or temp image (albums or playlists without collected covers)
+            # Download the image if there is no temp image to reuse
             if not local_image and image_url and image_url.startswith('http'):
                 try:
                     hash_short, img = self._download_and_hash_image(image_url)

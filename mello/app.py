@@ -317,6 +317,9 @@ class Mello:
         # TempItem and delete mode (with lock for thread-safe access)
         self.temp_item: Optional[CatalogItem] = None
         self._temp_item_lock = threading.Lock()
+        # Playlist whose own name/cover is on the temp tile; the first track's
+        # cover must not overwrite it.
+        self._temp_real_cover_uri: Optional[str] = None
         self.delete_mode_id: Optional[str] = None
         self._delete_button_rect: Optional[tuple] = None
         self._saving = False
@@ -362,10 +365,7 @@ class Mello:
         
         # Interaction tracking
         self.user_interacting = False
-        self._last_cover_collect_key: Optional[tuple] = None
-        self._cover_collect_context: Optional[str] = None
-        self._context_change_time: float = 0
-        
+
         # Button debouncing and feedback
         self._last_action_time = 0
         self._pressed_button: Optional[str] = None
@@ -1434,31 +1434,11 @@ class Mello:
         
         # Create/update tempItem
         is_playlist = 'playlist' in context_uri
-        collected_covers = self.catalog_manager.get_collected_covers(context_uri) if is_playlist else None
         track_cover = self.now_playing.track_cover
 
-        start_download = False
-        fetch_playlist_info = False
-
         with self._temp_item_lock:
-            current_cover_count = len(self.temp_item.images or []) if self.temp_item else 0
-            new_cover_count = len(collected_covers or [])
-
-            uri_changed = not self.temp_item or self.temp_item.uri != context_uri
-
-            needs_update = (
-                uri_changed or
-                new_cover_count > current_cover_count
-            )
-
-            if not needs_update:
+            if self.temp_item and self.temp_item.uri == context_uri:
                 return
-
-            # Only preserve local image if same URI (prevents wrong cover on wrong item)
-            if not uri_changed and self.temp_item.image and self.temp_item.image.startswith('/images/'):
-                local_image = self.temp_item.image
-            else:
-                local_image = None
 
             # Best guess until the real thing loads: go-librespot's /status only
             # ever reports the CURRENTLY PLAYING TRACK's album and cover, never
@@ -1470,13 +1450,12 @@ class Mello:
                 name=self.now_playing.track_album or ('Playlist' if is_playlist else 'Album'),
                 type='playlist' if is_playlist else 'album',
                 artist=self.now_playing.track_artist,
-                image=local_image or track_cover,
-                images=collected_covers,
+                image=track_cover,
                 is_temp=True
             )
 
-            start_download = not local_image and bool(track_cover)
-            fetch_playlist_info = is_playlist and uri_changed
+            start_download = bool(track_cover)
+            fetch_playlist_info = is_playlist
 
         self._update_carousel_max_index()
         self.renderer.invalidate()
@@ -1500,7 +1479,9 @@ class Mello:
 
             # Thread-safe update of temp_item
             with self._temp_item_lock:
-                if self.temp_item and self.temp_item.uri == context_uri:
+                # The playlist's own cover may have landed first; keep it.
+                if (self.temp_item and self.temp_item.uri == context_uri
+                        and self._temp_real_cover_uri != context_uri):
                     # Update temp item with downloaded image
                     self.temp_item = CatalogItem(
                         id=self.temp_item.id,
@@ -1533,6 +1514,8 @@ class Mello:
             with self._temp_item_lock:
                 if not self.temp_item or self.temp_item.uri != context_uri:
                     return
+                if local_image:
+                    self._temp_real_cover_uri = context_uri
                 self.temp_item = CatalogItem(
                     id=self.temp_item.id,
                     uri=self.temp_item.uri,
@@ -2660,19 +2643,6 @@ class Mello:
         """Save progress synchronously before shutdown."""
         self.playback.save_progress_on_shutdown(self.now_playing)
     
-    def _collect_cover_async(self, context_uri: str, cover_url: str):
-        """Collect playlist cover in background thread."""
-        try:
-            new_cover_added = self.catalog_manager.collect_cover_for_playlist(
-                context_uri, cover_url
-            )
-            if new_cover_added:
-                # Schedule UI update on next frame (thread-safe)
-                self._update_temp_item()
-                self.renderer.invalidate()
-        except Exception as e:
-            logger.debug(f'Cover collection failed: {e}')
-    
     def _sync_to_playing(self):
         """Sync carousel to currently playing item.
 
@@ -2956,24 +2926,6 @@ class Mello:
         
         self.playback.update_mock(dt, self.now_playing)
         self.playback.save_progress(self.now_playing)
-        
-        # Collect playlist covers in background (once per track change)
-        # Guard: context_uri comes from WebSocket (instant) but track_cover comes
-        # from HTTP /status (can lag). After a context switch, skip collection for
-        # 2 seconds so we don't associate the old track's cover with the new playlist.
-        np = self.now_playing
-        if (np.playing and 'playlist' in (np.context_uri or '')):
-            if np.context_uri != self._cover_collect_context:
-                self._cover_collect_context = np.context_uri
-                self._context_change_time = time.time()
-                self._last_cover_collect_key = None
-            elif time.time() - self._context_change_time > 2.0:
-                track_key = (np.context_uri, np.track_cover)
-                if track_key != self._last_cover_collect_key and np.track_cover:
-                    self._last_cover_collect_key = track_key
-                    run_async(self._collect_cover_async, np.context_uri, np.track_cover)
-        else:
-            self._cover_collect_context = None
         
         was_awake = not self.sleep_manager.is_sleeping
         # Don't sleep while the setup menu is open (e.g. WiFi AP mode)
