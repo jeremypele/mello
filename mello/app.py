@@ -957,8 +957,10 @@ class Mello:
     def _on_ws_update(self):
         """Called when WebSocket receives an event."""
         logger.debug(f'WebSocket event, context: {self.events.context_uri}')
-        if self.sleep_manager.is_sleeping:
-            self._poll_wake_event.set()
+        # Refresh now, awake or asleep. Waiting for the next poll left the
+        # screen saying "paused" for seconds after a resume, so the next tap
+        # sent play again instead of pausing.
+        self._poll_wake_event.set()
     
     def _on_ws_reconnect(self):
         """Called when WebSocket reconnects after disconnect."""
@@ -2091,16 +2093,18 @@ class Mello:
             self._set_manual_pause_lock('pause_tap')
         else:
             self._clear_manual_pause_lock('play_tap')
-        items = self.display_items
-        if self.now_playing.paused and items and self.selected_index < len(items):
-            focused_item = items[self.selected_index]
-            if not focused_item.is_temp:
-                logger.info(
-                    'Paused state: forcing focused context play '
-                    f'(focused={focused_item.uri[:40]}, paused_ctx={(self.now_playing.context_uri or "none")[:40]})'
-                )
-                self._play_item(focused_item.uri)
-                return
+            # Only a play tap may force play. A tap while a request is loading
+            # is a pause, even if the last status still says paused.
+            items = self.display_items
+            if self.now_playing.paused and items and self.selected_index < len(items):
+                focused_item = items[self.selected_index]
+                if not focused_item.is_temp:
+                    logger.info(
+                        'Paused state: forcing focused context play '
+                        f'(focused={focused_item.uri[:40]}, paused_ctx={(self.now_playing.context_uri or "none")[:40]})'
+                    )
+                    self._play_item(focused_item.uri)
+                    return
         self.playback.toggle_play(self.display_items, self.selected_index, self.now_playing)
     
     def _toggle_mock_play(self):
