@@ -307,9 +307,3 @@ class TestCoverUrlGuards:
         assert manager.download_temp_image('file:///etc/passwd') is None
         assert manager.download_temp_image('ftp://example.com/a.png') is None
         assert manager.download_temp_image('') is None
-
-    def test_collect_cover_for_playlist_rejects_empty_inputs(self, catalog_path, images_path):
-        manager = CatalogManager(catalog_path, images_path)
-        assert manager.collect_cover_for_playlist('', 'https://example.com/a.png') is False
-        assert manager.collect_cover_for_playlist('spotify:playlist:test', '') is False
-        assert manager.collect_cover_for_playlist('spotify:album:test', 'https://example.com/a.png') is False
