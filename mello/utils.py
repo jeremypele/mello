@@ -2,30 +2,39 @@
 Mello Utilities - Shared helper functions.
 """
 import sys
-import atexit
+import queue
+import threading
 import subprocess
 import logging
-from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=4)
-atexit.register(_executor.shutdown, wait=False)
+# Not a ThreadPoolExecutor: Python joins its workers at exit, so the status
+# poller (which never returns) kept every stop waiting for systemd's SIGKILL.
+# Daemon workers die with the process.
+_tasks = queue.SimpleQueue()
 
 
-def run_async(fn, *args):
-    """Fire-and-forget async execution in a bounded thread pool.
-
-    Wraps function to catch and log exceptions.
-    Max 4 concurrent background tasks — safe for Raspberry Pi.
-    """
-    def wrapper():
+def _worker():
+    while True:
+        fn, args = _tasks.get()
         try:
             fn(*args)
         except Exception as e:
             logger.warning(f'Async task {fn.__name__} failed: {e}', exc_info=True)
 
-    _executor.submit(wrapper)
+
+for _ in range(4):
+    threading.Thread(target=_worker, daemon=True, name='run_async').start()
+
+
+def run_async(fn, *args):
+    """Fire-and-forget async execution in a bounded thread pool.
+
+    Max 4 concurrent background tasks — safe for Raspberry Pi. Exceptions
+    are logged. Tasks still running at exit are dropped, not waited for.
+    """
+    _tasks.put((fn, args))
 
 
 def get_runtime_version_label() -> str:
