@@ -787,6 +787,75 @@ _migrate_015() {
 }
 
 # ============================================
+# Migration 016: Keep the WiFi chip awake (from upstream mello #61)
+# ============================================
+_migrate_016() {
+  # With WiFi power save on, the Pi's WiFi chip dozes and the router drops it
+  # (wpa_supplicant "CTRL-EVENT-DISCONNECTED reason=6/7"), several times a day.
+  # The NetworkManager setting makes it stick across reconnects and reboots.
+  # It takes effect on the next (re)connect; iw switches it off at once. iw
+  # also gives the WiFi keeper's log lines their access point and signal.
+  local CODE_DIR="$HOME/mello"
+  local CONF_DIR="${MELLO_NM_CONF_DIR:-/etc/NetworkManager/conf.d}"
+  local SRC="$CODE_DIR/pi/networkmanager/99-mello-wifi-powersave.conf"
+  if [ ! -f "$SRC" ]; then
+    log "ERROR: $SRC missing"
+    return 1
+  fi
+  sudo mkdir -p "$CONF_DIR"
+  sudo install -m 644 "$SRC" "$CONF_DIR/99-mello-wifi-powersave.conf"
+  sudo nmcli general reload conf 2>/dev/null || log "NetworkManager reads the WiFi power save config on its next start"
+  log "Installed WiFi power save config"
+  if ! command -v iw >/dev/null && [ ! -x /sbin/iw ]; then
+    sudo apt-get install -y -qq iw \
+      || { sudo apt-get update -qq && sudo apt-get install -y -qq iw; } \
+      || log "Could not install iw (WiFi log lines will lack signal details)"
+  fi
+  local IW
+  IW="$(command -v iw || echo /sbin/iw)"
+  if [ -x "$IW" ]; then
+    sudo "$IW" dev wlan0 set power_save off 2>/dev/null || log "Could not switch WiFi power save off now (applies on next connect)"
+  fi
+}
+
+# ============================================
+# Migration 017: Allow Mello to restart a hung Spotify engine (upstream #53)
+# ============================================
+_migrate_017() {
+  local SUDOERS_DIR="${MELLO_SUDOERS_DIR:-/etc/sudoers.d}"
+  local SUDOERS_FILE="$SUDOERS_DIR/mello-wifi"
+  [ -f "$SUDOERS_FILE" ] || SUDOERS_FILE="$SUDOERS_DIR/berry-wifi"
+
+  if [ ! -f "$SUDOERS_FILE" ]; then
+    log "Mello sudoers file not found, skipping librespot recovery permission"
+    return 0
+  fi
+  if sudo grep -q '/bin/systemctl restart mello-librespot' "$SUDOERS_FILE"; then
+    log "Librespot recovery permission already installed"
+    return 0
+  fi
+
+  local TMP_SUDOERS="/tmp/mello-sudoers.$$"
+  sudo sed \
+    's|/bin/systemctl start mello-librespot,|/bin/systemctl start mello-librespot, /bin/systemctl restart mello-librespot,|' \
+    "$SUDOERS_FILE" > "$TMP_SUDOERS"
+  if ! grep -q '/bin/systemctl restart mello-librespot' "$TMP_SUDOERS"; then
+    log "ERROR: existing sudoers rule has an unexpected format"
+    rm -f "$TMP_SUDOERS"
+    return 1
+  fi
+  if sudo visudo -cf "$TMP_SUDOERS"; then
+    sudo install -m 440 "$TMP_SUDOERS" "$SUDOERS_FILE"
+    log "Installed librespot recovery permission"
+  else
+    log "ERROR: librespot recovery sudoers validation failed"
+    rm -f "$TMP_SUDOERS"
+    return 1
+  fi
+  rm -f "$TMP_SUDOERS"
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -804,3 +873,5 @@ run_migration "012" "Reboot after display boot config changes"
 run_migration "013" "Disable Spotify suggested autoplay"
 run_migration "014" "Keep librespot independent of UI sleep/restarts"
 run_migration "015" "go-librespot 0.9.0 (reconnects after a WiFi outage)"
+run_migration "016" "Keep the WiFi chip awake (no power save)"
+run_migration "017" "Allow automatic librespot recovery"
