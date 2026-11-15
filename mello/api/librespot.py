@@ -92,7 +92,16 @@ class LibrespotAPI:
                     'context_uri': None,
                     'track': None,
                 }
-            return resp.json()
+            if resp.status_code != 200:
+                logger.debug(f'Status request failed: HTTP {resp.status_code}')
+                return None
+            data = resp.json()
+            # An error body is not a playback state: read as "stopped" it
+            # could clear progress or trigger a replay (from upstream mello #57).
+            if not isinstance(data, dict) or not isinstance(data.get('stopped'), bool):
+                logger.warning('Spotify status response is missing playback state')
+                return None
+            return data
         except requests.RequestException as e:
             logger.debug(f'Status request failed: {e}')
             return None

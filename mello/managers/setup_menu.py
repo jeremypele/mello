@@ -22,6 +22,28 @@ from .alarms import cycle_sound, new_alarm, resolve_date
 
 _REPO_DIR = str(Path(__file__).resolve().parent.parent.parent)
 
+
+def _update_command(log_path: Path) -> list:
+    """How the settings menu starts an update (from upstream mello #59).
+
+    The update ends by restarting Mello, which stops everything Mello itself
+    started: run from here, the script was cut off at that point, so its
+    last check and "Update complete" never happened. Started as a job of
+    the user's own service manager instead, it lives on like the nightly
+    run does. The output goes to the same log the nightly run uses (a pipe
+    nobody reads fills up during apt/pip and then hangs the update).
+    """
+    script = f'{_REPO_DIR}/pi/auto-update.sh'
+    if shutil.which('systemd-run'):
+        return [
+            'systemd-run', '--user', '--wait', '--collect', '--quiet',
+            f'--unit=mello-manual-update-{int(time.time())}',
+            '-p', f'StandardOutput=append:{log_path}',
+            '-p', f'StandardError=append:{log_path}',
+            'bash', script,
+        ]
+    return ['bash', '-c', f'exec bash "{script}" >> "{log_path}" 2>&1']
+
 # SSIDs to exclude when scanning or forgetting WiFi networks
 _WIFI_SKIP_SSIDS = {'Mello-Setup', 'mello-ap', 'mello-setup'}
 
@@ -88,6 +110,11 @@ class SetupMenu:
         self.scroll_offset = 0
         self.current_network = None
         self._on_invalidate()
+
+    @property
+    def wifi_setup_running(self) -> bool:
+        """True while Mello is its own hotspot for joining a new network."""
+        return self.state == MenuState.WIFI_AP or self._wifi_process is not None
 
     def show_wifi(self):
         """Open directly to the WiFi screen (skipping main menu)."""
@@ -321,9 +348,9 @@ class SetupMenu:
         self._on_toast("Updating... don't unplug")
         try:
             self._update_process = subprocess.Popen(
-                ['bash', f'{_REPO_DIR}/pi/auto-update.sh'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                _update_command(Path.home() / 'mello-update.log'),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             logger.info('Manual update triggered')
         except Exception as e:

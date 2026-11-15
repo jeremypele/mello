@@ -36,12 +36,18 @@ from .handlers import TouchHandler, EventListener, EvdevTouchHandler
 from .managers import SleepManager, SmoothCarousel, PlayTimer, PerformanceMonitor, AutoPauseManager, SetupMenu, Settings, UsageTracker, BluetoothManager, QuietHours
 from .managers.quiet_hours import clock_is_trusted
 from .managers.alarms import AlarmManager, next_upcoming
+from .managers.wifi_keeper import WifiKeeper
 from .api.tracklist import parse_context, parse_episode
 from .controllers import VolumeController, PlaybackController, is_repeatable_spotify_context
 from .ui import ImageCache, Renderer, RenderContext
 from .utils import run_async, get_runtime_version_label, set_system_volume
 
 logger = logging.getLogger(__name__)
+
+# go-librespot's local API not answering for this long means it is hung:
+# restart it, but not more often than the cooldown (from upstream mello #53).
+LIBRESPOT_RESTART_AFTER = 60.0
+LIBRESPOT_RESTART_COOLDOWN = 300.0
 
 
 class Mello:
@@ -345,6 +351,8 @@ class Mello:
         # we keep the last known now_playing snapshot and block auto-retrigger.
         self._status_unknown: bool = False
         self._last_status_unknown_log: float = 0.0
+        self._status_failure_started_at: float = 0.0
+        self._last_librespot_restart_at: float = 0.0
         self._last_status_not_ready_log: float = 0.0
         self._user_activated_playback: bool = False
         self._last_play_commit_uri: Optional[str] = None
@@ -383,9 +391,13 @@ class Mello:
         self._cached_has_network: bool = True
         self._network_check_time: float = 0.0
         
-        # Register signal handlers for graceful shutdown
+        # Register signal handlers for graceful shutdown. SIGHUP too: the
+        # service owns tty1 through a login session, and on reboot/shutdown
+        # that session ends first and hangs up the tty. Unhandled, SIGHUP
+        # killed Mello at once, before it saved where each album was.
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
+        signal.signal(signal.SIGHUP, self._handle_signal)
         
         # Performance logging
         self._last_fps_log = time.time()
@@ -411,6 +423,11 @@ class Mello:
             on_volume_preview=self._preview_volume,
             on_play_track=self._play_track_at_index,
             alarm_manager=self.alarms,
+        )
+        # Rejoins a known WiFi network when NetworkManager has given up.
+        self.wifi_keeper = WifiKeeper(
+            is_online=self._has_network_connection,
+            is_busy=lambda: self.setup_menu.wifi_setup_running,
         )
         # Volume button hold tracking (3s hold opens setup menu)
         self._volume_hold_start: Optional[float] = None
@@ -1042,8 +1059,8 @@ class Mello:
         self.renderer.invalidate()
 
     def _handle_signal(self, signum, frame):
-        """Handle SIGTERM/SIGINT for graceful shutdown."""
-        sig_name = 'SIGTERM' if signum == signal.SIGTERM else 'SIGINT'
+        """Handle SIGTERM/SIGINT/SIGHUP for graceful shutdown."""
+        sig_name = signal.Signals(signum).name
         logger.info(f'Received {sig_name}, shutting down...')
         self.running = False
     
@@ -1071,6 +1088,7 @@ class Mello:
 
             # Start Bluetooth monitoring
             self.bluetooth.start_monitoring()
+            self.wifi_keeper.start()
         else:
             logger.info('Running in MOCK MODE')
             self._startup_ready = True
@@ -1154,6 +1172,7 @@ class Mello:
         self._save_progress_on_shutdown()
         self.tracker.on_shutdown()
         self.bluetooth.stop()
+        self.wifi_keeper.stop()
         
         # Restore display before exit so next boot doesn't start with black screen
         if self.sleep_manager.is_sleeping:
@@ -1298,6 +1317,7 @@ class Mello:
             logger.info(f'  fail_count={self._connection_fail_count}, status={raw is not None}')
         
         if raw and isinstance(raw, dict):
+            self._status_failure_started_at = 0.0
             self._last_status_ok_at = time.time()
             self._status_unknown = False
             api_context_uri = raw.get('context_uri')
@@ -1363,12 +1383,55 @@ class Mello:
             # Keep last known now_playing to avoid duplicate play re-triggers.
             self._status_unknown = True
             now = time.time()
+            if self._status_failure_started_at == 0.0:
+                self._status_failure_started_at = now
             if now - self._last_status_unknown_log > 3.0:
                 logger.warning(
                     'STATUS unknown | preserving last now_playing snapshot '
                     f'| connected={self.connected} | fail_count={self._connection_fail_count}'
                 )
                 self._last_status_unknown_log = now
+            self._maybe_restart_librespot(now)
+
+    def _maybe_restart_librespot(self, now: float):
+        """Restart a locally hung Spotify engine after a sustained outage."""
+        failure_started_at = self._status_failure_started_at
+        if failure_started_at == 0.0:
+            return
+        if now - failure_started_at < LIBRESPOT_RESTART_AFTER:
+            return
+        if (
+            self._last_librespot_restart_at > 0.0
+            and now - self._last_librespot_restart_at < LIBRESPOT_RESTART_COOLDOWN
+        ):
+            return
+
+        self._last_librespot_restart_at = now
+        self._show_toast('Restarting Spotify...')
+        logger.warning(
+            'LIBRESPOT recovery | restarting unresponsive service '
+            f'after {now - failure_started_at:.1f}s'
+        )
+        try:
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'restart', 'mello-librespot'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                self._status_failure_started_at = now
+                self._connection_fail_count = 0
+                self._poll_wake_event.set()
+                logger.info('LIBRESPOT recovery | restart requested successfully')
+            else:
+                logger.error(
+                    'LIBRESPOT recovery | restart failed '
+                    f'rc={result.returncode} stderr={result.stderr.strip()}'
+                )
+        except Exception as exc:
+            logger.error(f'LIBRESPOT recovery | restart error: {exc}', exc_info=True)
     
     def _check_autoplay(self):
         """Detect autoplay and clear progress when context finishes."""
@@ -2901,6 +2964,8 @@ class Mello:
             self._pending_focus_uri is not None
         )
         
+        if self.wifi_keeper.take_restored():
+            self._cached_has_network = True
         self.setup_menu.update()
 
         # Volume hold detection: open menu after MENU_HOLD_TIME seconds

@@ -40,7 +40,7 @@ sudo apt-get install -y \
   curl git \
   python3-venv python3-pip python3-dev python3-pygame \
   libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
-  network-manager \
+  network-manager iw \
   pipewire pipewire-pulse wireplumber pipewire-alsa libspa-0.2-bluetooth
 
 # ============================================
@@ -332,6 +332,11 @@ UDEV
 sudo udevadm control --reload-rules 2>/dev/null || true
 sudo udevadm trigger 2>/dev/null || true
 
+# Keep the WiFi chip awake: with power save on the router drops the Pi
+# several times a day (see pi/networkmanager/99-mello-wifi-powersave.conf)
+sudo mkdir -p /etc/NetworkManager/conf.d
+sudo install -m 644 ~/mello/pi/networkmanager/99-mello-wifi-powersave.conf /etc/NetworkManager/conf.d/99-mello-wifi-powersave.conf
+
 # Disable getty on tty1 so Mello can own the display (kmsdrm requires a free VT)
 sudo systemctl mask getty@tty1.service 2>/dev/null || true
 sudo systemctl stop getty@tty1.service 2>/dev/null || true
@@ -340,7 +345,7 @@ sudo systemctl stop getty@tty1.service 2>/dev/null || true
 # without a password prompt (needed for the setup menu)
 TMP_SUDOERS="/tmp/mello-wifi.$$"
 cat > "$TMP_SUDOERS" << EOF
-$MELLO_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /bin/systemctl stop mello-librespot, /bin/systemctl start mello-librespot, /bin/systemctl restart mello-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth
+$MELLO_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /bin/systemctl stop mello-librespot, /bin/systemctl start mello-librespot, /bin/systemctl restart mello-librespot, /bin/systemctl restart mello-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth
 EOF
 sudo visudo -cf "$TMP_SUDOERS"
 sudo install -m 440 "$TMP_SUDOERS" /etc/sudoers.d/mello-wifi
