@@ -78,8 +78,8 @@ class LibrespotAPI:
 
         Returns:
             dict: Parsed /status payload. For HTTP 204 (reachable, no active session),
-                  returns a minimal "stopped" payload so callers can distinguish
-                  no-session from transport errors.
+                  returns a minimal "stopped" payload with no_session=True so callers
+                  can distinguish no-session from transport errors.
             None: Transport/request error (status unknown).
         """
         try:
@@ -91,6 +91,7 @@ class LibrespotAPI:
                     'paused': False,
                     'context_uri': None,
                     'track': None,
+                    'no_session': True,
                 }
             if resp.status_code != 200:
                 logger.debug(f'Status request failed: HTTP {resp.status_code}')

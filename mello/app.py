@@ -2,6 +2,7 @@
 Mello Application - Main application class.
 """
 import os
+import json
 import time
 import datetime
 import signal
@@ -18,7 +19,7 @@ from .config import (
     SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_MARKET,
     SPOTIFY_REFRESH_TOKEN,
     CATALOG_PATH, PROGRESS_PATH, IMAGES_DIR, TRACKS_DIR, ICONS_DIR,
-    MOCK_MODE,
+    LIBRESPOT_STATE_PATH, MOCK_MODE,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
     CAROUSEL_X, CAROUSEL_CENTER_Y, CONTROLS_X, BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING,
     CAROUSEL_TOUCH_MARGIN, MAX_SWIPE_JUMP, VELOCITY_THRESHOLDS,
@@ -305,6 +306,7 @@ class Mello:
             is_request_current=self._is_play_request_current,
             on_play_committed=self._on_play_committed,
             on_play_failed=self._on_play_failed,
+            is_online=self._get_cached_network_status,
         )
         
         # State (with thread-safe now_playing and connected)
@@ -1317,8 +1319,9 @@ class Mello:
             logger.info(f'  fail_count={self._connection_fail_count}, status={raw is not None}')
         
         if raw and isinstance(raw, dict):
-            self._status_failure_started_at = 0.0
-            self._last_status_ok_at = time.time()
+            now = time.time()
+            self._recover_lost_login(raw, now)
+            self._last_status_ok_at = now
             self._status_unknown = False
             api_context_uri = raw.get('context_uri')
             ws_context_uri = self.events.context_uri
@@ -1392,6 +1395,36 @@ class Mello:
                 )
                 self._last_status_unknown_log = now
             self._maybe_restart_librespot(now)
+
+    def _recover_lost_login(self, raw: dict, now: float):
+        """Restart go-librespot when it has lost its Spotify login for good.
+
+        After about 15 minutes offline go-librespot 0.9.0 drops its login and
+        reloads the saved one only once (daemon/app.go). If the WiFi is still
+        down at that moment it gives up, and every play tap then failed until
+        someone cast from a phone. A restart reloads the saved login. With no
+        saved login (never set up, or reset) or no WiFi there is nothing to
+        reload, so the engine is left alone.
+        """
+        if not (raw.get('no_session') and self._login_can_be_restored()):
+            self._status_failure_started_at = 0.0
+            return
+        if self._status_failure_started_at == 0.0:
+            self._status_failure_started_at = now
+            logger.warning(
+                'LIBRESPOT recovery | no Spotify login while online, restarting in '
+                f'{LIBRESPOT_RESTART_AFTER:.0f}s to reload the saved login'
+            )
+        self._maybe_restart_librespot(now)
+
+    def _login_can_be_restored(self) -> bool:
+        """True when go-librespot has a saved Spotify login and WiFi is up."""
+        try:
+            state = json.loads(LIBRESPOT_STATE_PATH.read_text())
+            saved = (state.get('credentials') or {}).get('username')
+        except Exception:
+            return False
+        return bool(saved) and self._get_cached_network_status()
 
     def _maybe_restart_librespot(self, now: float):
         """Restart a locally hung Spotify engine after a sustained outage."""

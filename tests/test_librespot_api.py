@@ -26,6 +26,7 @@ def test_status_204_returns_explicit_stopped_payload():
         "paused": False,
         "context_uri": None,
         "track": None,
+        "no_session": True,
     }
 
 
