@@ -824,9 +824,11 @@ _migrate_016() {
 _migrate_017() {
   local SUDOERS_DIR="${MELLO_SUDOERS_DIR:-/etc/sudoers.d}"
   local SUDOERS_FILE="$SUDOERS_DIR/mello-wifi"
-  [ -f "$SUDOERS_FILE" ] || SUDOERS_FILE="$SUDOERS_DIR/berry-wifi"
+  # /etc/sudoers.d is root only (mode 750): look with sudo, or the file
+  # never seems to exist.
+  sudo test -f "$SUDOERS_FILE" || SUDOERS_FILE="$SUDOERS_DIR/berry-wifi"
 
-  if [ ! -f "$SUDOERS_FILE" ]; then
+  if ! sudo test -f "$SUDOERS_FILE"; then
     log "Mello sudoers file not found, skipping librespot recovery permission"
     return 0
   fi
@@ -856,6 +858,15 @@ _migrate_017() {
 }
 
 # ============================================
+# Migration 018: Run 017 again, now that it can see the sudoers file
+# ============================================
+_migrate_018() {
+  # 017 looked for the file as the app user, who cannot see inside
+  # /etc/sudoers.d, so it skipped on every device and was still marked done.
+  _migrate_017
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -875,3 +886,4 @@ run_migration "014" "Keep librespot independent of UI sleep/restarts"
 run_migration "015" "go-librespot 0.9.0 (reconnects after a WiFi outage)"
 run_migration "016" "Keep the WiFi chip awake (no power save)"
 run_migration "017" "Allow automatic librespot recovery"
+run_migration "018" "Allow automatic librespot recovery (017 skipped it)"
