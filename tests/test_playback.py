@@ -314,6 +314,18 @@ class TestPlayFailure:
         toast.assert_called_once_with('Connect via Spotify')
 
     @patch('mello.controllers.playback.time.sleep')
+    def test_offline_failure_says_no_wifi(self, mock_sleep):
+        """Offline, 'Connect via Spotify' sent the owner the wrong way for 43 h."""
+        pc, api, _, _ = _make_controller(is_online=lambda: False)
+        api.play.return_value = None
+        toast = MagicMock()
+        pc._on_toast = toast
+
+        pc._execute_play('spotify:album:x', from_beginning=False, epoch=0)
+
+        toast.assert_called_once_with('No WiFi')
+
+    @patch('mello.controllers.playback.time.sleep')
     def test_transient_failure_defers_toast_to_retry(self, mock_sleep):
         """Transient failures (False) keep loader alive for retry window — no immediate toast."""
         pc, api, _, _ = _make_controller()

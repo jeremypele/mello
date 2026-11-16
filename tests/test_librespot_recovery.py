@@ -1,8 +1,11 @@
+import json
 import sys
 import types
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 pygame_stub = types.ModuleType('pygame')
 pygame_stub.Surface = object
@@ -138,3 +141,26 @@ def test_restart_becomes_eligible_when_cooldown_expires(mock_run):
     app._maybe_restart_librespot(now=450.0)
 
     mock_run.assert_called_once()
+
+
+@pytest.mark.parametrize('username, online, restarts', [
+    ('113523095', True, True),    # login lost in a long outage: reload the saved one
+    ('', True, False),            # never set up, or reset: nothing to reload
+    ('113523095', False, False),  # still offline: a restart could not log in either
+])
+@patch('mello.app.subprocess.run')
+def test_lost_login_restarts_librespot_only_when_it_can_reload(
+    mock_run, tmp_path, username, online, restarts,
+):
+    state = tmp_path / 'state.json'
+    state.write_text(json.dumps({'credentials': {'username': username, 'data': 'x'}}))
+    app = _make_app()
+    app._status_failure_started_at = 0.0
+    app._get_cached_network_status = lambda: online
+    mock_run.return_value = MagicMock(returncode=0, stderr='')
+
+    with patch('mello.app.LIBRESPOT_STATE_PATH', state):
+        app._recover_lost_login({'no_session': True}, now=100.0)
+        app._recover_lost_login({'no_session': True}, now=161.0)
+
+    assert mock_run.called is restarts

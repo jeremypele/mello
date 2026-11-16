@@ -43,6 +43,7 @@ class PlaybackController:
         is_request_current: Optional[Callable[[int, str], bool]] = None,
         on_play_committed: Optional[Callable[[str, int], None]] = None,
         on_play_failed: Optional[Callable[[str, int], None]] = None,
+        is_online: Optional[Callable[[], bool]] = None,
     ):
         self.api = api
         self.catalog_manager = catalog_manager
@@ -54,6 +55,7 @@ class PlaybackController:
         self._is_request_current = is_request_current or (lambda epoch, uri: True)
         self._on_play_committed = on_play_committed or (lambda uri, epoch: None)
         self._on_play_failed = on_play_failed or (lambda uri, epoch: None)
+        self._is_online = is_online or (lambda: True)
         self._last_toast_at: float = 0.0
         self._last_toast_message: Optional[str] = None
         self._transport_next_allowed = {'pause': 0.0, 'resume': 0.0}
@@ -157,9 +159,10 @@ class PlaybackController:
             logger.info(f'Dropping stale failed retry by age: {failed_age:.1f}s')
             self._failed_play = None
             self._failed_play_since = 0.0
-            self._emit_toast('Loading failed, try again')
+            message = self._failure_toast('Loading failed, try again')
+            self._emit_toast(message)
             logger.warning(
-                'TOAST shown | message="Loading failed, try again" '
+                f'TOAST shown | message="{message}" '
                 f'| reason=retry_window_expired | age={failed_age:.1f}s'
             )
             return
@@ -387,9 +390,10 @@ class PlaybackController:
                 if result is None:
                     # No active Spotify session: definitive failure, clear loader immediately.
                     self.play_state.clear()
-                    self._emit_toast('Connect via Spotify')
+                    message = self._failure_toast('Connect via Spotify')
+                    self._emit_toast(message)
                     logger.warning(
-                        'TOAST shown | message="Connect via Spotify" '
+                        f'TOAST shown | message="{message}" '
                         f'| failed_uri={uri[:50]} | epoch={epoch}'
                     )
                 else:
@@ -454,6 +458,10 @@ class PlaybackController:
                 if should_execute_pending:
                     logger.debug(f'Executing queued request: {pending[0]}')
                     self.play_item(pending[0], pending[1], pending[2], pending[3])
+
+    def _failure_toast(self, message: str) -> str:
+        """Name the real problem: with no WiFi, Spotify is not the fix."""
+        return message if self._is_online() else 'No WiFi'
 
     def _emit_toast(self, message: str, cooldown_s: float = 6.0):
         """Emit toast with small cooldown to prevent spam loops."""
