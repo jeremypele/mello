@@ -29,23 +29,36 @@ def _migration_body(n: str) -> str:
     return migrate.split(f'_migrate_{n}() {{', 1)[1].split('\n}', 1)[0]
 
 
-def _run_migration_017(sudoers_dir: Path):
+def _run_migration_017(sudoers_dir: Path, migration: str = '017'):
+    # Like /etc/sudoers.d (root only, mode 750), the folder is closed to the
+    # app user: only sudo sees inside. A plain `[ -f ]` there always failed on
+    # devices, while an open test folder hid that.
     script = textwrap.dedent(
         f'''\
         set -euo pipefail
         MELLO_SUDOERS_DIR={str(sudoers_dir)!r}
         log() {{ :; }}
         sudo() {{
-          if [ "$1" = visudo ]; then return 0; fi
-          "$@"
+          chmod 755 "$MELLO_SUDOERS_DIR"
+          local rc=0
+          [ "$1" = visudo ] || "$@" || rc=$?
+          chmod 000 "$MELLO_SUDOERS_DIR"
+          return $rc
         }}
         _migrate_017() {{
         {_migration_body('017')}
         }}
-        _migrate_017
+        _migrate_018() {{
+        {_migration_body('018')}
+        }}
+        _migrate_{migration}
         '''
     )
-    return subprocess.run(['bash'], input=script, text=True, capture_output=True)
+    sudoers_dir.chmod(0o000)
+    try:
+        return subprocess.run(['bash'], input=script, text=True, capture_output=True)
+    finally:
+        sudoers_dir.chmod(0o755)
 
 
 def test_librespot_recovery_permission_is_installed_and_migrated():
@@ -55,6 +68,17 @@ def test_librespot_recovery_permission_is_installed_and_migrated():
     assert '/bin/systemctl restart mello-librespot' in setup
     assert '/bin/systemctl restart mello-librespot' in _migration_body('017')
     assert 'run_migration "017" "Allow automatic librespot recovery"' in migrate
+    assert 'run_migration "018"' in migrate
+
+
+def test_migration_018_installs_the_rule_017_skipped(tmp_path):
+    sudoers = tmp_path / 'mello-wifi'
+    sudoers.write_text('mello ALL=(ALL) NOPASSWD: /bin/systemctl start mello-librespot, /bin/systemctl restart mello-native\n')
+
+    result = _run_migration_017(tmp_path, migration='018')
+
+    assert result.returncode == 0, result.stderr
+    assert sudoers.read_text().count('/bin/systemctl restart mello-librespot') == 1
 
 
 def test_migration_017_updates_current_sudoers_rule(tmp_path):
